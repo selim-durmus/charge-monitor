@@ -30,10 +30,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +56,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.nicky.chargemonitor.DashboardState
 import com.nicky.chargemonitor.PowerPoint
+import com.nicky.chargemonitor.accessory.AccessoryBaseline
+import com.nicky.chargemonitor.accessory.AccessoryProfile
 import com.nicky.chargemonitor.battery.BatteryReading
 import com.nicky.chargemonitor.battery.ChargeState
 import com.nicky.chargemonitor.battery.PowerSource
@@ -72,6 +80,9 @@ import kotlin.math.min
 fun ChargeDashboard(
     state: DashboardState,
     onOpenSessions: () -> Unit,
+    onNameAccessory: (String) -> Unit,
+    onStartExtendedRecording: () -> Unit,
+    onStopExtendedRecording: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -105,6 +116,22 @@ fun ChargeDashboard(
                     onClick = onOpenSessions,
                 )
             }
+            item {
+                AccessoryProfileCard(
+                    reading = state.reading,
+                    profile = state.currentAccessory,
+                    baseline = state.currentAccessoryBaseline,
+                    onSaveName = onNameAccessory,
+                )
+            }
+            item {
+                ScreenOffDiagnosticCard(
+                    connected = state.reading?.isPowerConnected == true,
+                    active = state.extendedRecordingActive,
+                    onStart = onStartExtendedRecording,
+                    onStop = onStopExtendedRecording,
+                )
+            }
             item { HeroCard(reading = state.reading) }
             item {
                 LivePowerCard(
@@ -116,6 +143,174 @@ fun ChargeDashboard(
             item { BatteryDetails(reading = state.reading) }
             item { MeasurementNote() }
         }
+    }
+}
+
+@Composable
+private fun ScreenOffDiagnosticCard(
+    connected: Boolean,
+    active: Boolean,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val actionEnabled = active || connected
+    val accent = if (active) WarningAmber else EnergyCyan
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(19.dp))
+            .background(
+                if (active) WarningAmber.copy(alpha = 0.09f) else CardBackground,
+            )
+            .border(1.dp, accent.copy(alpha = 0.28f), RoundedCornerShape(19.dp))
+            .padding(15.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "SCREEN-OFF DIAGNOSTIC",
+                style = MaterialTheme.typography.labelMedium,
+                color = accent,
+            )
+            Text(
+                text = when {
+                    active -> "Recording continues at 1 sample / sec"
+                    connected -> "Capture a complete charging trace"
+                    else -> "Connect power to enable"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = TextPrimary,
+            )
+            Text(
+                text = if (active) {
+                    "A persistent notification is shown until stopped or unplugged."
+                } else {
+                    "Optional · holds a wake lock only while you explicitly record."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = if (active) "STOP" else "START",
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(enabled = actionEnabled) {
+                    if (active) onStop() else onStart()
+                }
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (actionEnabled) accent else TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun AccessoryProfileCard(
+    reading: BatteryReading?,
+    profile: AccessoryProfile?,
+    baseline: AccessoryBaseline?,
+    onSaveName: (String) -> Unit,
+) {
+    var showNameDialog by remember { mutableStateOf(false) }
+    var accessoryName by remember(profile?.id, showNameDialog) {
+        mutableStateOf(profile?.name.orEmpty())
+    }
+    val connected = reading?.isPowerConnected == true
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(19.dp))
+            .background(CardBackground)
+            .border(1.dp, DividerGreen, RoundedCornerShape(19.dp))
+            .clickable(enabled = connected) { showNameDialog = true }
+            .padding(15.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "CHARGER / PAD PROFILE",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextSecondary,
+            )
+            Text(
+                text = when {
+                    !connected -> "Connect a source to identify it"
+                    profile != null -> profile.name
+                    else -> "Unnamed ${reading?.powerSource?.label ?: "source"}"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = TextPrimary,
+            )
+            if (connected) {
+                Text(
+                    text = baseline?.let {
+                        "${it.medianPowerWatts.formatValue(1, "W")} typical · " +
+                            "${it.sessionCount} comparable session" +
+                            if (it.sessionCount == 1) "" else "s"
+                    } ?: "Name this source to begin building its baseline",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                )
+            }
+        }
+        if (connected) {
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = if (profile == null) "NAME" else "EDIT",
+                style = MaterialTheme.typography.labelLarge,
+                color = EnergyGreen,
+            )
+        }
+    }
+
+    if (showNameDialog) {
+        AlertDialog(
+            onDismissRequest = { showNameDialog = false },
+            title = {
+                Text(
+                    text = "Name this power source",
+                    color = TextPrimary,
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "The name will be reused when Android reports the same source fingerprint.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = accessoryName,
+                        onValueChange = { accessoryName = it.take(40) },
+                        singleLine = true,
+                        label = { Text("Example: Pixel Stand") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = accessoryName.isNotBlank(),
+                    onClick = {
+                        onSaveName(accessoryName)
+                        showNameDialog = false
+                    },
+                ) {
+                    Text("SAVE")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNameDialog = false }) {
+                    Text("CANCEL")
+                }
+            },
+            containerColor = CardBackgroundElevated,
+        )
     }
 }
 
@@ -823,6 +1018,71 @@ private fun MetricsGrid(reading: BatteryReading?) {
                 hint = "Battery sensor",
                 accent = Color(0xFFFF8FA3),
                 modifier = Modifier.weight(1f),
+            )
+        }
+        ThermalHeadroomCard(reading = reading)
+    }
+}
+
+@Composable
+private fun ThermalHeadroomCard(reading: BatteryReading?) {
+    val animatedHeadroom = animatedMetric(
+        target = reading?.thermalHeadroomForecast30Seconds,
+        label = "thermal headroom",
+        durationMillis = 450,
+    )
+    val fraction = (animatedHeadroom ?: 0.0).toFloat().coerceIn(0f, 1f)
+    val accent = when {
+        fraction >= 1f -> Color(0xFFFF8FA3)
+        fraction >= 0.75f -> WarningAmber
+        else -> EnergyCyan
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(CardBackground)
+            .border(1.dp, DividerGreen, RoundedCornerShape(20.dp))
+            .padding(15.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Text(
+                    text = "THERMAL HEADROOM · 30S FORECAST",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary,
+                )
+                Text(
+                    text = animatedHeadroom?.let {
+                        "${(it * 100.0).toInt()}% of severe threshold"
+                    } ?: "Forecast unavailable",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextPrimary,
+                )
+            }
+            Text(
+                text = reading?.thermalStatus?.label ?: "—",
+                style = MaterialTheme.typography.labelLarge,
+                color = accent,
+            )
+        }
+        Spacer(Modifier.height(11.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(7.dp)
+                .clip(RoundedCornerShape(50))
+                .background(DividerGreen),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction)
+                    .height(7.dp)
+                    .background(accent),
             )
         }
     }

@@ -1,6 +1,8 @@
 package com.nicky.chargemonitor.session
 
 import android.content.Context
+import com.nicky.chargemonitor.accessory.AccessoryBaseline
+import com.nicky.chargemonitor.accessory.AccessoryProfile
 import com.nicky.chargemonitor.battery.BatteryReading
 import com.nicky.chargemonitor.battery.ChargeState
 import com.nicky.chargemonitor.battery.ChargingProfile
@@ -17,7 +19,11 @@ class ChargingSessionRecorder(context: Context) {
     private var lastPowerConnected: Boolean? = null
 
     @Synchronized
-    fun record(reading: BatteryReading, timestampMillis: Long): Boolean {
+    fun record(
+        reading: BatteryReading,
+        timestampMillis: Long,
+        accessoryProfile: AccessoryProfile? = null,
+    ): Boolean {
         if (!reading.isPowerConnected) {
             val changed = if (activeSession != null) {
                 finishActiveSession(
@@ -42,7 +48,14 @@ class ChargingSessionRecorder(context: Context) {
                 reading = reading,
                 timestampMillis = timestampMillis,
                 joinedInProgress = joinedInProgress,
+                accessoryProfile = accessoryProfile,
             )
+        }
+        if (accessoryProfile != null &&
+            activeSession?.accessoryId != accessoryProfile.id
+        ) {
+            assignAccessoryToActiveSession(accessoryProfile)
+            changed = true
         }
 
         val currentAccumulator = accumulator
@@ -92,10 +105,65 @@ class ChargingSessionRecorder(context: Context) {
     @Synchronized
     fun activeSessionId(): String? = activeSession?.id
 
+    @Synchronized
+    fun renameAccessory(profile: AccessoryProfile) {
+        sessions = sessions.map { session ->
+            if (session.accessoryId == profile.id) {
+                session.copy(accessoryName = profile.name).also(store::updateSessionMetadata)
+            } else {
+                session
+            }
+        }
+        activeSession = activeSession?.let { active ->
+            sessions.firstOrNull { it.id == active.id }
+        }
+    }
+
+    @Synchronized
+    fun accessoryBaselines(): Map<String, AccessoryBaseline> =
+        sessions
+            .filter { it.accessoryId != null }
+            .groupBy { requireNotNull(it.accessoryId) }
+            .mapNotNull { (accessoryId, matchingSessions) ->
+                val comparableSamples = matchingSessions.flatMap { session ->
+                    session.samples.filter { sample ->
+                        sample.elapsedMillis >= BASELINE_WARMUP_MILLIS &&
+                            (sample.levelPercent ?: 100) < BASELINE_MAX_BATTERY_PERCENT &&
+                            sample.chargingProfile != ChargingProfile.LONG_LIFE &&
+                            sample.thermalStatus.severity < ThermalStatus.MODERATE.severity &&
+                            (sample.powerAverageWatts ?: 0.0) > 0.0
+                    }
+                }
+                val powers = comparableSamples
+                    .mapNotNull { it.powerAverageWatts }
+                    .sorted()
+                if (powers.size < MINIMUM_BASELINE_BUCKETS) {
+                    null
+                } else {
+                    AccessoryBaseline(
+                        accessoryId = accessoryId,
+                        sessionCount = matchingSessions.count { session ->
+                            session.samples.any(comparableSamples::contains)
+                        },
+                        comparableBucketCount = powers.size,
+                        averagePowerWatts = powers.average(),
+                        medianPowerWatts = powers.percentile(0.50),
+                        tenthPercentilePowerWatts = powers.percentile(0.10),
+                        peakPowerWatts = matchingSessions
+                            .flatMap { it.samples }
+                            .mapNotNull { it.powerMaximumWatts }
+                            .maxOrNull()
+                            ?: powers.last(),
+                    )
+                }
+            }
+            .associateBy { it.accessoryId }
+
     private fun startOrResumeSession(
         reading: BatteryReading,
         timestampMillis: Long,
         joinedInProgress: Boolean,
+        accessoryProfile: AccessoryProfile?,
     ): Boolean {
         val latest = sessions.maxByOrNull { it.startedAtMillis }
         val latestEnd = latest?.endedAtMillis
@@ -129,6 +197,8 @@ class ChargingSessionRecorder(context: Context) {
             joinedInProgress = joinedInProgress,
             endReason = null,
             initialSource = reading.powerSource,
+            accessoryId = accessoryProfile?.id,
+            accessoryName = accessoryProfile?.name,
             samples = emptyList(),
             events = emptyList(),
         )
@@ -251,6 +321,17 @@ class ChargingSessionRecorder(context: Context) {
             .take(MAX_STORED_SESSIONS)
     }
 
+    private fun assignAccessoryToActiveSession(profile: AccessoryProfile) {
+        val session = activeSession ?: return
+        val updated = session.copy(
+            accessoryId = profile.id,
+            accessoryName = profile.name,
+        )
+        activeSession = updated
+        replaceCached(updated)
+        store.updateSessionMetadata(updated)
+    }
+
     private fun closeInterruptedSession(session: ChargingSession): ChargingSession {
         if (!session.isActive) return session
         val endedAt = session.samples.lastOrNull()?.timestampMillis
@@ -304,6 +385,9 @@ private class SampleAccumulator(
             temperatureCelsius = readings.mapNotNull { it.temperatureCelsius }.averageOrNull(),
             thermalStatus = readings.maxByOrNull { it.thermalStatus.severity }?.thermalStatus
                 ?: ThermalStatus.UNKNOWN,
+            thermalHeadroomForecast30Seconds = readings
+                .mapNotNull { it.thermalHeadroomForecast30Seconds }
+                .maxOrNull(),
             chargeState = latest.chargeState,
             powerSource = latest.powerSource,
             chargingProfile = latest.chargingProfile,
@@ -349,3 +433,12 @@ private fun ChargingProfile?.profileLabel(): String = this?.label ?: "System man
 
 private fun List<Double>.averageOrNull(): Double? =
     if (isEmpty()) null else average()
+
+private fun List<Double>.percentile(fraction: Double): Double {
+    val index = ((size - 1) * fraction).toInt().coerceIn(indices)
+    return this[index]
+}
+
+private const val BASELINE_WARMUP_MILLIS = 30_000L
+private const val BASELINE_MAX_BATTERY_PERCENT = 78
+private const val MINIMUM_BASELINE_BUCKETS = 30

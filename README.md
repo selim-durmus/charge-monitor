@@ -1,6 +1,6 @@
 # Charge Monitor
 
-A fast, foreground-only Android charging dashboard designed for an unrooted Pixel 10. It distinguishes wired, USB, wireless, and dock power sources and shows the battery data exposed by Android in a polished, live energy-console UI.
+A fast Android charging dashboard and diagnostic recorder designed for an unrooted Pixel 10. It distinguishes wired, USB, wireless, and dock power sources and presents the battery data exposed by Android in a polished live energy-console UI.
 
 ## What it shows
 
@@ -10,22 +10,37 @@ A fast, foreground-only Android charging dashboard designed for an unrooted Pixe
 - Advertised source power ceiling when the Pixel supplies it
 - Instantaneous and average current
 - Voltage, temperature, health, and percentage
+- Current thermal status and Android's 30-second thermal-headroom forecast
 - Time to full, remaining charge, remaining energy, cycle count, and chemistry when the phone exposes them
 - A rolling 30-second in-memory power chart
 - Automatic foreground charging-session diagnostics with one-second min/average/max buckets
 - Five-session history with power/temperature graphs, event markers, and likely-cause analysis
+- Named charger/pad profiles with baselines built from comparable cool, lower-charge samples
+- Side-by-side normalized session comparison with a test-confidence score
+- A guided five-minute A/B workflow for testing two chargers, cables, or pads under similar conditions
+- Optional user-started recording while the display is off
 - JSON and CSV session sharing
 
-The sampler runs every 250 ms only while the activity is `RESUMED`. It stops when the app loses
-focus and never uses a service, network permission, or background process. While power is
-connected, a private SQLite database keeps the latest five foreground sessions. A session that
-resumes within five minutes with the same source is joined with a visible gap marker; otherwise a
-new session begins. The recorder stores one bucket per second while the dashboard continues
-updating every 250 ms.
+The live sampler runs every 250 ms only while the activity is `RESUMED`. By default it stops when
+the app loses focus. While power is connected, a private SQLite database keeps the latest five
+sessions. A foreground session that resumes within five minutes with the same source is joined
+with a visible gap marker; otherwise a new session begins. The recorder stores one bucket per
+second while the dashboard continues updating every 250 ms.
 
-Live numbers use a 160 ms interpolation, so changes settle smoothly before the next 250 ms sample without reducing measurement speed.
+Screen-off recording is strictly opt-in. Starting it from the dashboard runs a foreground service
+at 1 Hz, shows a persistent notification, and holds a partial wake lock so the trace remains
+continuous. It stops when the user taps Stop or when power disconnects. The live activity and
+service share one recorder, so opening the app during an extended trace does not duplicate
+samples.
+
+Live numbers use a 160 ms interpolation, so changes settle smoothly before the next 250 ms sample
+without reducing measurement speed.
 
 > Android exposes battery-side net current, not the USB-PD or wireless charger's negotiated input power. Device hardware may publish a new reading less frequently than the app polls. Unsupported readings are shown as unavailable rather than as zero.
+
+Charger/pad identity is a best-effort local fingerprint based on connection type and optional
+source-capability values from the battery broadcast. Android does not expose USB or Qi serial
+identifiers to this app, so two accessories reporting the same capability may share a profile.
 
 ## Build
 
@@ -71,6 +86,6 @@ The app combines the sticky `ACTION_BATTERY_CHANGED` state with `BatteryManager`
 
 All unit conversions and derived power calculations preserve Android's signed current convention:
 positive is energy entering the battery and negative is energy leaving it. Session diagnosis also
-uses Android's public thermal status, charge profile, source capability hints, battery level, and
-connection events. These are evidence-based clues rather than a direct view of USB-PD, PPS, or Qi
-negotiation.
+uses Android's public thermal status and headroom forecast, charge profile, source capability
+hints, battery level, and connection events. These are evidence-based clues rather than a direct
+view of USB-PD, PPS, or Qi negotiation.

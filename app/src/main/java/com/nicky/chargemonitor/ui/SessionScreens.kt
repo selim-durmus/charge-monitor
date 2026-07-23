@@ -26,7 +26,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -46,8 +48,11 @@ import com.nicky.chargemonitor.session.ChargingSession
 import com.nicky.chargemonitor.session.ChargingSessionSummary
 import com.nicky.chargemonitor.session.DiagnosisTone
 import com.nicky.chargemonitor.session.SessionAnalyzer
+import com.nicky.chargemonitor.session.SessionComparator
 import com.nicky.chargemonitor.session.SessionEvent
 import com.nicky.chargemonitor.session.SessionExportFormat
+import com.nicky.chargemonitor.session.GuidedChargingTestState
+import com.nicky.chargemonitor.session.GuidedTestPhase
 import com.nicky.chargemonitor.ui.theme.AppBackground
 import com.nicky.chargemonitor.ui.theme.CardBackground
 import com.nicky.chargemonitor.ui.theme.CardBackgroundElevated
@@ -65,11 +70,14 @@ import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.delay
 
 private enum class AppDestination {
     DASHBOARD,
     SESSIONS,
     DETAIL,
+    COMPARISON,
+    GUIDED_TEST,
 }
 
 @Composable
@@ -78,6 +86,15 @@ fun ChargeMonitorApp(
     onSelectSession: (String) -> Unit,
     onClearSelectedSession: () -> Unit,
     onShareSession: (String, SessionExportFormat) -> Unit,
+    onNameAccessory: (String) -> Unit,
+    onSelectComparison: (List<String>) -> Unit,
+    onClearComparison: () -> Unit,
+    onBeginGuidedTest: () -> Unit,
+    onArmGuidedTest: () -> Unit,
+    onFinishGuidedTestPhase: () -> Unit,
+    onCancelGuidedTest: () -> Unit,
+    onStartExtendedRecording: () -> Unit,
+    onStopExtendedRecording: () -> Unit,
 ) {
     var destinationName by rememberSaveable {
         mutableStateOf(AppDestination.DASHBOARD.name)
@@ -86,11 +103,21 @@ fun ChargeMonitorApp(
         ?: AppDestination.DASHBOARD
 
     BackHandler(enabled = destination != AppDestination.DASHBOARD) {
-        if (destination == AppDestination.DETAIL) {
-            onClearSelectedSession()
-            destinationName = AppDestination.SESSIONS.name
-        } else {
-            destinationName = AppDestination.DASHBOARD.name
+        when (destination) {
+            AppDestination.DETAIL -> {
+                onClearSelectedSession()
+                destinationName = AppDestination.SESSIONS.name
+            }
+            AppDestination.COMPARISON -> {
+                onClearComparison()
+                destinationName = AppDestination.SESSIONS.name
+            }
+            AppDestination.GUIDED_TEST -> {
+                onCancelGuidedTest()
+                destinationName = AppDestination.SESSIONS.name
+            }
+            AppDestination.SESSIONS -> destinationName = AppDestination.DASHBOARD.name
+            AppDestination.DASHBOARD -> Unit
         }
     }
 
@@ -98,6 +125,9 @@ fun ChargeMonitorApp(
         AppDestination.DASHBOARD -> ChargeDashboard(
             state = state,
             onOpenSessions = { destinationName = AppDestination.SESSIONS.name },
+            onNameAccessory = onNameAccessory,
+            onStartExtendedRecording = onStartExtendedRecording,
+            onStopExtendedRecording = onStopExtendedRecording,
         )
 
         AppDestination.SESSIONS -> SessionHistoryScreen(
@@ -107,6 +137,14 @@ fun ChargeMonitorApp(
             onOpenSession = { sessionId ->
                 onSelectSession(sessionId)
                 destinationName = AppDestination.DETAIL.name
+            },
+            onCompareSessions = { sessionIds ->
+                onSelectComparison(sessionIds)
+                destinationName = AppDestination.COMPARISON.name
+            },
+            onStartGuidedTest = {
+                onBeginGuidedTest()
+                destinationName = AppDestination.GUIDED_TEST.name
             },
         )
 
@@ -121,6 +159,768 @@ fun ChargeMonitorApp(
             },
             onShareSession = onShareSession,
         )
+
+        AppDestination.COMPARISON -> SessionComparisonScreen(
+            sessions = state.comparisonSessions,
+            onBack = {
+                onClearComparison()
+                destinationName = AppDestination.SESSIONS.name
+            },
+        )
+
+        AppDestination.GUIDED_TEST -> GuidedTestScreen(
+            test = state.guidedTest,
+            reading = state.reading,
+            accessoryName = state.currentAccessory?.name,
+            comparisonReady = state.comparisonSessions.size == 2,
+            onBack = {
+                onCancelGuidedTest()
+                destinationName = AppDestination.SESSIONS.name
+            },
+            onArm = onArmGuidedTest,
+            onFinishPhase = onFinishGuidedTestPhase,
+            onViewResults = { destinationName = AppDestination.COMPARISON.name },
+        )
+    }
+}
+
+@Composable
+private fun ComparisonPicker(
+    comparisonMode: Boolean,
+    selectedCount: Int,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
+    onCompare: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardBackground, RoundedCornerShape(18.dp))
+            .border(1.dp, DividerGreen, RoundedCornerShape(18.dp))
+            .padding(13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (comparisonMode) "SELECT TWO SESSIONS" else "COMPARE CHARGING",
+                style = MaterialTheme.typography.labelMedium,
+                color = EnergyCyan,
+            )
+            Text(
+                text = if (comparisonMode) {
+                    "$selectedCount / 2 selected"
+                } else {
+                    "Overlay normalized power and temperature"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextPrimary,
+            )
+        }
+        if (comparisonMode) {
+            Text(
+                text = "CANCEL",
+                modifier = Modifier
+                    .clickable(onClick = onCancel)
+                    .padding(8.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+            )
+            Text(
+                text = "COMPARE",
+                modifier = Modifier
+                    .clickable(enabled = selectedCount == 2, onClick = onCompare)
+                    .padding(8.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = if (selectedCount == 2) EnergyGreen else TextSecondary,
+            )
+        } else {
+            Text(
+                text = "START  ›",
+                modifier = Modifier
+                    .clickable(onClick = onStart)
+                    .padding(8.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = EnergyGreen,
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuidedTestLaunchCard(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF132720), RoundedCornerShape(18.dp))
+            .border(1.dp, EnergyGreen.copy(alpha = 0.28f), RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+            .padding(14.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "GUIDED A/B CHARGING TEST",
+                style = MaterialTheme.typography.labelMedium,
+                color = EnergyGreen,
+            )
+            Text(
+                text = "Run two controlled five-minute tests",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextPrimary,
+            )
+        }
+        Text(
+            text = "START  ›",
+            style = MaterialTheme.typography.labelLarge,
+            color = EnergyGreen,
+        )
+    }
+}
+
+@Composable
+private fun GuidedTestScreen(
+    test: GuidedChargingTestState,
+    reading: com.nicky.chargemonitor.battery.BatteryReading?,
+    accessoryName: String?,
+    comparisonReady: Boolean,
+    onBack: () -> Unit,
+    onArm: () -> Unit,
+    onFinishPhase: () -> Unit,
+    onViewResults: () -> Unit,
+) {
+    var clockMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val runningStart = when (test.phase) {
+        GuidedTestPhase.RUNNING_A -> test.firstRun?.startedAtMillis
+        GuidedTestPhase.RUNNING_B -> test.secondRun?.startedAtMillis
+        else -> null
+    }
+    LaunchedEffect(test.phase, runningStart) {
+        while (runningStart != null) {
+            clockMillis = System.currentTimeMillis()
+            delay(1_000L)
+        }
+    }
+    val elapsedMillis = runningStart?.let { (clockMillis - it).coerceAtLeast(0L) } ?: 0L
+    val connected = reading?.isPowerConnected == true
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppBackground),
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            item {
+                ScreenHeader(
+                    eyebrow = "CONTROLLED DIAGNOSTIC",
+                    title = "A/B charging test",
+                    onBack = onBack,
+                )
+            }
+            item {
+                GuidedPhaseHero(
+                    test = test,
+                    connected = connected,
+                    accessoryName = accessoryName,
+                    elapsedMillis = elapsedMillis,
+                )
+            }
+            item {
+                GuidedLiveConditions(
+                    reading = reading,
+                    accessoryName = accessoryName,
+                )
+            }
+            item {
+                GuidedTestAction(
+                    test = test,
+                    connected = connected,
+                    comparisonReady = comparisonReady,
+                    onArm = onArm,
+                    onFinishPhase = onFinishPhase,
+                    onViewResults = onViewResults,
+                )
+            }
+            item {
+                GuidedTestInstructions(test.phase)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GuidedPhaseHero(
+    test: GuidedChargingTestState,
+    connected: Boolean,
+    accessoryName: String?,
+    elapsedMillis: Long,
+) {
+    val title = when (test.phase) {
+        GuidedTestPhase.PREPARE_A -> "Prepare charger A"
+        GuidedTestPhase.WAITING_FOR_A -> "Connect charger A"
+        GuidedTestPhase.RUNNING_A -> "Testing A · ${accessoryName ?: "Current source"}"
+        GuidedTestPhase.PREPARE_B -> "Prepare charger B"
+        GuidedTestPhase.WAITING_FOR_B -> "Connect charger B"
+        GuidedTestPhase.RUNNING_B -> "Testing B · ${accessoryName ?: "Current source"}"
+        GuidedTestPhase.COMPLETE -> "Both test windows captured"
+        GuidedTestPhase.IDLE -> "Ready to begin"
+    }
+    val detail = when (test.phase) {
+        GuidedTestPhase.PREPARE_A ->
+            if (connected) "Disconnect the current charger before arming test A."
+            else "Keep the phone cool and note the current battery level."
+        GuidedTestPhase.WAITING_FOR_A -> "The timer starts automatically when power connects."
+        GuidedTestPhase.RUNNING_A -> "Let the phone remain still for five minutes."
+        GuidedTestPhase.PREPARE_B ->
+            if (connected) "Disconnect charger A, then connect charger B after arming."
+            else "Use the same phone position and similar temperature."
+        GuidedTestPhase.WAITING_FOR_B -> "The second timer starts when power connects."
+        GuidedTestPhase.RUNNING_B -> "Match the duration and conditions from test A."
+        GuidedTestPhase.COMPLETE -> "The results use only the captured test windows."
+        GuidedTestPhase.IDLE -> "Two controlled traces will be compared."
+    }
+    val running = test.phase == GuidedTestPhase.RUNNING_A ||
+        test.phase == GuidedTestPhase.RUNNING_B
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                if (running) Color(0xFF0E2B20) else CardBackground,
+                RoundedCornerShape(27.dp),
+            )
+            .border(
+                1.dp,
+                if (running) EnergyGreen.copy(alpha = 0.42f) else DividerGreen,
+                RoundedCornerShape(27.dp),
+            )
+            .padding(20.dp),
+    ) {
+        Text(
+            text = "STEP ${test.phase.stepNumber()} OF 4",
+            style = MaterialTheme.typography.labelMedium,
+            color = EnergyGreen,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(text = title, style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+        Spacer(Modifier.height(6.dp))
+        Text(text = detail, style = MaterialTheme.typography.bodyLarge, color = TextSecondary)
+        if (running) {
+            Spacer(Modifier.height(18.dp))
+            Text(
+                text = elapsedMillis.formatDuration(),
+                style = MaterialTheme.typography.displaySmall,
+                color = EnergyGreen,
+            )
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .background(DividerGreen, RoundedCornerShape(50)),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(
+                            (elapsedMillis.toFloat() / GUIDED_TEST_TARGET_MILLIS)
+                                .coerceIn(0f, 1f),
+                        )
+                        .height(8.dp)
+                        .background(EnergyGreen, RoundedCornerShape(50)),
+                )
+            }
+            Text(
+                text = "Recommended window · 5 minutes",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextSecondary,
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuidedLiveConditions(
+    reading: com.nicky.chargemonitor.battery.BatteryReading?,
+    accessoryName: String?,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Text(
+            text = "LIVE CONDITIONS",
+            modifier = Modifier.padding(start = 3.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            ReportStat(
+                label = "Battery",
+                value = reading?.levelPercent?.let { "$it%" } ?: "—",
+                accent = WarningAmber,
+                modifier = Modifier.weight(1f),
+            )
+            ReportStat(
+                label = "Temperature",
+                value = reading?.temperatureCelsius.formatMetric("°C", 1),
+                accent = Color(0xFFFF8FA3),
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            ReportStat(
+                label = "Source",
+                value = accessoryName ?: reading?.powerSource?.label ?: "Disconnected",
+                accent = EnergyCyan,
+                modifier = Modifier.weight(1f),
+            )
+            ReportStat(
+                label = "Net power",
+                value = reading?.powerWatts.formatMetric("W", 2),
+                accent = EnergyGreen,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuidedTestAction(
+    test: GuidedChargingTestState,
+    connected: Boolean,
+    comparisonReady: Boolean,
+    onArm: () -> Unit,
+    onFinishPhase: () -> Unit,
+    onViewResults: () -> Unit,
+) {
+    val label: String
+    val enabled: Boolean
+    val action: () -> Unit
+    when (test.phase) {
+        GuidedTestPhase.PREPARE_A -> {
+            label = if (connected) "DISCONNECT TO CONTINUE" else "ARM TEST A"
+            enabled = !connected
+            action = onArm
+        }
+        GuidedTestPhase.PREPARE_B -> {
+            label = if (connected) "DISCONNECT TO CONTINUE" else "ARM TEST B"
+            enabled = !connected
+            action = onArm
+        }
+        GuidedTestPhase.RUNNING_A, GuidedTestPhase.RUNNING_B -> {
+            label = "FINISH THIS TEST WINDOW"
+            enabled = true
+            action = onFinishPhase
+        }
+        GuidedTestPhase.COMPLETE -> {
+            label = if (comparisonReady) "VIEW COMPARISON" else "PREPARING RESULTS…"
+            enabled = comparisonReady
+            action = onViewResults
+        }
+        else -> {
+            label = "WAITING FOR POWER…"
+            enabled = false
+            action = {}
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(54.dp)
+            .background(
+                if (enabled) EnergyGreen else CardBackgroundElevated,
+                RoundedCornerShape(17.dp),
+            )
+            .clickable(enabled = enabled, onClick = action),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (enabled) AppBackground else TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun GuidedTestInstructions(phase: GuidedTestPhase) {
+    val instructions = when (phase) {
+        GuidedTestPhase.PREPARE_A, GuidedTestPhase.WAITING_FOR_A -> listOf(
+            "Prefer a battery level below 70% to avoid normal charge taper.",
+            "Remove a thick case if you want to isolate thermal effects.",
+            "Keep screen brightness and phone usage consistent.",
+        )
+        GuidedTestPhase.PREPARE_B, GuidedTestPhase.WAITING_FOR_B -> listOf(
+            "Allow temperature to return close to test A's starting value.",
+            "Keep the same phone position and screen conditions.",
+            "For wireless pads, align the phone consistently.",
+        )
+        GuidedTestPhase.RUNNING_A, GuidedTestPhase.RUNNING_B -> listOf(
+            "Do not move the phone or launch other apps.",
+            "Five minutes provides a stronger comparison; one minute is the minimum useful trace.",
+        )
+        GuidedTestPhase.COMPLETE -> listOf(
+            "The comparison confidence score reflects differences in level, temperature, source, and duration.",
+        )
+        GuidedTestPhase.IDLE -> emptyList()
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(EnergyGreenMuted.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
+            .padding(15.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "TEST GUIDANCE",
+            style = MaterialTheme.typography.labelMedium,
+            color = EnergyGreen,
+        )
+        instructions.forEach { instruction ->
+            Row {
+                Text(text = "•", color = EnergyGreen)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = instruction,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionComparisonScreen(
+    sessions: List<ChargingSession>,
+    onBack: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppBackground),
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            item {
+                ScreenHeader(
+                    eyebrow = "A / B ANALYSIS",
+                    title = "Session comparison",
+                    onBack = onBack,
+                )
+            }
+            if (sessions.size < 2) {
+                item {
+                    EmptySessionsCard()
+                }
+            } else {
+                val first = sessions[0]
+                val second = sessions[1]
+                val comparison = SessionComparator.compare(first, second)
+                item {
+                    ComparisonHero(
+                        comparison = comparison,
+                        firstName = first.comparisonName("Session A"),
+                        secondName = second.comparisonName("Session B"),
+                    )
+                }
+                item {
+                    ComparisonMetricsCard(
+                        first = first,
+                        second = second,
+                        comparison = comparison,
+                    )
+                }
+                item {
+                    DualTraceCard(
+                        title = "NORMALIZED POWER",
+                        unit = "W",
+                        includeZero = true,
+                        firstSamples = comparison.firstComparableTrace,
+                        secondSamples = comparison.secondComparableTrace,
+                        value = { it.powerAverageWatts },
+                    )
+                }
+                item {
+                    DualTraceCard(
+                        title = "TEMPERATURE",
+                        unit = "°C",
+                        includeZero = false,
+                        firstSamples = comparison.firstComparableTrace,
+                        secondSamples = comparison.secondComparableTrace,
+                        value = { it.temperatureCelsius },
+                    )
+                }
+                item {
+                    ComparisonConditionsCard(
+                        first = first,
+                        second = second,
+                        confidence = comparison.confidenceScore,
+                    )
+                }
+                item { DiagnosticLimitNote() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComparisonHero(
+    comparison: com.nicky.chargemonitor.session.SessionComparison,
+    firstName: String,
+    secondName: String,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF10272D), RoundedCornerShape(26.dp))
+            .border(1.dp, EnergyCyan.copy(alpha = 0.35f), RoundedCornerShape(26.dp))
+            .padding(20.dp),
+    ) {
+        Text(
+            text = "COMPARISON RESULT · ${comparison.confidenceScore}/10 CONFIDENCE",
+            style = MaterialTheme.typography.labelMedium,
+            color = EnergyCyan,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = comparison.headline,
+            style = MaterialTheme.typography.headlineSmall,
+            color = TextPrimary,
+        )
+        Spacer(Modifier.height(7.dp))
+        Text(
+            text = comparison.detail,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+            ChartLegend(EnergyGreen, "A · $firstName")
+            ChartLegend(EnergyCyan, "B · $secondName")
+        }
+    }
+}
+
+@Composable
+private fun ComparisonMetricsCard(
+    first: ChargingSession,
+    second: ChargingSession,
+    comparison: com.nicky.chargemonitor.session.SessionComparison,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardBackground, RoundedCornerShape(23.dp))
+            .border(1.dp, DividerGreen, RoundedCornerShape(23.dp))
+            .padding(17.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = "COMPARABLE METRICS",
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary,
+        )
+        ComparisonMetricRow(
+            label = "Average power",
+            first = comparison.first.averagePowerWatts.formatMetric("W", 2),
+            second = comparison.second.averagePowerWatts.formatMetric("W", 2),
+        )
+        ComparisonMetricRow(
+            label = "Low 10%",
+            first = comparison.first.tenthPercentilePowerWatts.formatMetric("W", 2),
+            second = comparison.second.tenthPercentilePowerWatts.formatMetric("W", 2),
+        )
+        ComparisonMetricRow(
+            label = "Peak temperature",
+            first = comparison.first.peakTemperatureCelsius.formatMetric("°C", 1),
+            second = comparison.second.peakTemperatureCelsius.formatMetric("°C", 1),
+        )
+        ComparisonMetricRow(
+            label = "Battery range",
+            first = SessionAnalyzer.summarize(first).levelRange(),
+            second = SessionAnalyzer.summarize(second).levelRange(),
+        )
+    }
+}
+
+@Composable
+private fun ComparisonMetricRow(
+    label: String,
+    first: String,
+    second: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardBackgroundElevated, RoundedCornerShape(14.dp))
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1.2f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+        )
+        Text(
+            text = first,
+            modifier = Modifier.weight(0.8f),
+            textAlign = TextAlign.End,
+            style = MaterialTheme.typography.titleSmall,
+            color = EnergyGreen,
+        )
+        Text(
+            text = second,
+            modifier = Modifier.weight(0.8f),
+            textAlign = TextAlign.End,
+            style = MaterialTheme.typography.titleSmall,
+            color = EnergyCyan,
+        )
+    }
+}
+
+@Composable
+private fun DualTraceCard(
+    title: String,
+    unit: String,
+    includeZero: Boolean,
+    firstSamples: List<com.nicky.chargemonitor.session.DiagnosticSample>,
+    secondSamples: List<com.nicky.chargemonitor.session.DiagnosticSample>,
+    value: (com.nicky.chargemonitor.session.DiagnosticSample) -> Double?,
+) {
+    val firstValues = firstSamples.mapNotNull(value)
+    val secondValues = secondSamples.mapNotNull(value)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardBackground, RoundedCornerShape(23.dp))
+            .border(1.dp, DividerGreen, RoundedCornerShape(23.dp))
+            .padding(17.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(text = title, style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+            Text(
+                text = "${firstValues.maxOrNull().formatMetric(unit, 1)} / " +
+                    secondValues.maxOrNull().formatMetric(unit, 1),
+                style = MaterialTheme.typography.labelLarge,
+                color = TextPrimary,
+            )
+        }
+        Spacer(Modifier.height(13.dp))
+        DualTraceChart(
+            firstValues = firstValues,
+            secondValues = secondValues,
+            includeZero = includeZero,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(155.dp),
+        )
+    }
+}
+
+@Composable
+private fun DualTraceChart(
+    firstValues: List<Double>,
+    secondValues: List<Double>,
+    includeZero: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val first = remember(firstValues) { firstValues.downsample(350) }
+    val second = remember(secondValues) { secondValues.downsample(350) }
+    Canvas(modifier = modifier) {
+        repeat(4) { row ->
+            val y = size.height * row / 3f
+            drawLine(
+                color = DividerGreen.copy(alpha = 0.62f),
+                start = Offset(0f, y),
+                end = Offset(size.width, y),
+                strokeWidth = 1.dp.toPx(),
+            )
+        }
+        val all = first + second
+        if (all.isEmpty()) return@Canvas
+        val rawMin = if (includeZero) {
+            min(0.0, all.minOrNull() ?: 0.0)
+        } else {
+            all.minOrNull() ?: 0.0
+        }
+        val rawMax = max(1.0, all.maxOrNull() ?: 1.0)
+        val padding = max(0.5, (rawMax - rawMin) * 0.1)
+        val chartMin = rawMin - padding
+        val range = rawMax + padding - chartMin
+
+        fun drawValues(values: List<Double>, color: Color) {
+            if (values.size < 2) return
+            val path = Path()
+            values.forEachIndexed { index, reading ->
+                val x = size.width * index / (values.size - 1).toFloat()
+                val y = (size.height * (1.0 - (reading - chartMin) / range)).toFloat()
+                if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(
+                path = path,
+                color = color,
+                style = Stroke(width = 2.3.dp.toPx(), cap = StrokeCap.Round),
+            )
+        }
+        drawValues(first, EnergyGreen)
+        drawValues(second, EnergyCyan)
+    }
+}
+
+@Composable
+private fun ComparisonConditionsCard(
+    first: ChargingSession,
+    second: ChargingSession,
+    confidence: Int,
+) {
+    val firstSummary = SessionAnalyzer.summarize(first)
+    val secondSummary = SessionAnalyzer.summarize(second)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardBackground, RoundedCornerShape(20.dp))
+            .border(1.dp, DividerGreen, RoundedCornerShape(20.dp))
+            .padding(16.dp),
+    ) {
+        Text(
+            text = "TEST QUALITY",
+            style = MaterialTheme.typography.labelMedium,
+            color = if (confidence >= 8) EnergyGreen else WarningAmber,
+        )
+        Spacer(Modifier.height(5.dp))
+        Text(
+            text = "Confidence improves when battery level, starting temperature, connection " +
+                "type, and test duration are similar.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+        )
+        Spacer(Modifier.height(10.dp))
+        ComparisonMetricRow(
+            label = "Source",
+            first = firstSummary.source.label,
+            second = secondSummary.source.label,
+        )
+        Spacer(Modifier.height(7.dp))
+        ComparisonMetricRow(
+            label = "Buckets",
+            first = first.samples.size.toString(),
+            second = second.samples.size.toString(),
+        )
     }
 }
 
@@ -130,7 +930,11 @@ private fun SessionHistoryScreen(
     activeSessionId: String?,
     onBack: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onCompareSessions: (List<String>) -> Unit,
+    onStartGuidedTest: () -> Unit,
 ) {
+    var comparisonMode by remember { mutableStateOf(false) }
+    var selectedForComparison by remember { mutableStateOf<Set<String>>(emptySet()) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -157,6 +961,28 @@ private fun SessionHistoryScreen(
                     count = summaries.size,
                 )
             }
+            if (summaries.size >= 2) {
+                item {
+                    ComparisonPicker(
+                        comparisonMode = comparisonMode,
+                        selectedCount = selectedForComparison.size,
+                        onStart = {
+                            comparisonMode = true
+                            selectedForComparison = emptySet()
+                        },
+                        onCancel = {
+                            comparisonMode = false
+                            selectedForComparison = emptySet()
+                        },
+                        onCompare = {
+                            onCompareSessions(selectedForComparison.toList())
+                        },
+                    )
+                }
+            }
+            item {
+                GuidedTestLaunchCard(onClick = onStartGuidedTest)
+            }
             if (summaries.isEmpty()) {
                 item { EmptySessionsCard() }
             } else {
@@ -165,7 +991,24 @@ private fun SessionHistoryScreen(
                         SessionSummaryCard(
                             summary = summary,
                             isRecording = summary.id == activeSessionId,
-                            onClick = { onOpenSession(summary.id) },
+                            comparisonLabel = selectedForComparison
+                                .indexOf(summary.id)
+                                .takeIf { it >= 0 }
+                                ?.let { if (it == 0) "A" else "B" },
+                            onClick = {
+                                if (comparisonMode) {
+                                    selectedForComparison =
+                                        if (summary.id in selectedForComparison) {
+                                            selectedForComparison - summary.id
+                                        } else if (selectedForComparison.size < 2) {
+                                            selectedForComparison + summary.id
+                                        } else {
+                                            selectedForComparison
+                                        }
+                                } else {
+                                    onOpenSession(summary.id)
+                                }
+                            },
                         )
                     }
                 }
@@ -358,6 +1201,7 @@ private fun EmptySessionsCard() {
 private fun SessionSummaryCard(
     summary: ChargingSessionSummary,
     isRecording: Boolean,
+    comparisonLabel: String?,
     onClick: () -> Unit,
 ) {
     val accent = summary.diagnosis.tone.color()
@@ -385,13 +1229,14 @@ private fun SessionSummaryCard(
                     color = TextPrimary,
                 )
                 Text(
-                    text = "${summary.source.label} · ${summary.durationMillis.formatDuration()}",
+                    text = "${summary.accessoryName ?: summary.source.label} · " +
+                        summary.durationMillis.formatDuration(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary,
                 )
             }
             Text(
-                text = if (isRecording) "REC" else summary.levelRange(),
+                text = comparisonLabel ?: if (isRecording) "REC" else summary.levelRange(),
                 modifier = Modifier
                     .background(
                         if (isRecording) EnergyGreen.copy(alpha = 0.14f)
@@ -400,7 +1245,7 @@ private fun SessionSummaryCard(
                     )
                     .padding(horizontal = 10.dp, vertical = 5.dp),
                 style = MaterialTheme.typography.labelLarge,
-                color = if (isRecording) EnergyGreen else TextPrimary,
+                color = if (isRecording || comparisonLabel != null) EnergyGreen else TextPrimary,
             )
         }
         Spacer(Modifier.height(16.dp))
@@ -519,6 +1364,22 @@ private fun SessionStats(summary: ChargingSessionSummary) {
                 Modifier.weight(1f),
             )
         }
+        if (summary.accessoryName != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                ReportStat(
+                    "Accessory",
+                    summary.accessoryName,
+                    EnergyGreen,
+                    Modifier.weight(1f),
+                )
+                ReportStat(
+                    "Connection",
+                    summary.source.label,
+                    EnergyCyan,
+                    Modifier.weight(1f),
+                )
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             ReportStat(
                 "Battery",
@@ -544,6 +1405,22 @@ private fun SessionStats(summary: ChargingSessionSummary) {
                 "Source ceiling",
                 summary.sourceCeilingWatts.formatMetric("W", 1),
                 EnergyGreen,
+                Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            ReportStat(
+                "Peak temperature",
+                summary.peakTemperatureCelsius.formatMetric("°C", 1),
+                Color(0xFFFF8FA3),
+                Modifier.weight(1f),
+            )
+            ReportStat(
+                "Thermal forecast",
+                summary.peakThermalHeadroomForecast?.let {
+                    "${(it * 100.0).toInt()}% severe"
+                } ?: "Unavailable",
+                WarningAmber,
                 Modifier.weight(1f),
             )
         }
@@ -942,6 +1819,16 @@ private fun ChargingSessionSummary.levelRange(): String {
     return "$start → $end"
 }
 
+private fun ChargingSession.comparisonName(fallback: String): String =
+    accessoryName ?: "${initialSource.label} $fallback"
+
+private fun GuidedTestPhase.stepNumber(): Int = when (this) {
+    GuidedTestPhase.IDLE, GuidedTestPhase.PREPARE_A, GuidedTestPhase.WAITING_FOR_A -> 1
+    GuidedTestPhase.RUNNING_A -> 2
+    GuidedTestPhase.PREPARE_B, GuidedTestPhase.WAITING_FOR_B -> 3
+    GuidedTestPhase.RUNNING_B, GuidedTestPhase.COMPLETE -> 4
+}
+
 private fun Double?.formatMetric(unit: String, decimals: Int): String =
     if (this == null || !isFinite()) {
         "—"
@@ -991,3 +1878,4 @@ private fun <T> List<T>.downsample(maxPoints: Int): List<T> {
 
 private val SESSION_LIST_FORMAT = DateTimeFormatter.ofPattern("EEE, MMM d · h:mm a")
 private val SESSION_TITLE_FORMAT = DateTimeFormatter.ofPattern("MMM d · h:mm a")
+private const val GUIDED_TEST_TARGET_MILLIS = 5 * 60_000L

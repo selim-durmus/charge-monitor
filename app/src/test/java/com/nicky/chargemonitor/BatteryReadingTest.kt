@@ -89,4 +89,5 @@ private fun sampleReading(
     sourceMaxCurrentMicroamps = 1_071_000,
     sourceMaxVoltageMicrovolts = 14_000_000,
     thermalStatus = ThermalStatus.NONE,
+    thermalHeadroomForecast30Seconds = null,
 )

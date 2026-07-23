@@ -1,8 +1,11 @@
 package com.nicky.chargemonitor
 
 import com.nicky.chargemonitor.battery.BatteryReading
+import com.nicky.chargemonitor.accessory.AccessoryBaseline
+import com.nicky.chargemonitor.accessory.AccessoryProfile
 import com.nicky.chargemonitor.session.ChargingSession
 import com.nicky.chargemonitor.session.ChargingSessionSummary
+import com.nicky.chargemonitor.session.GuidedChargingTestState
 
 const val SAMPLE_INTERVAL_MILLIS = 250L
 const val MAX_GRAPH_SAMPLES = 120
@@ -20,6 +23,11 @@ data class DashboardState(
     val sessionSummaries: List<ChargingSessionSummary> = emptyList(),
     val activeSessionId: String? = null,
     val selectedSession: ChargingSession? = null,
+    val currentAccessory: AccessoryProfile? = null,
+    val currentAccessoryBaseline: AccessoryBaseline? = null,
+    val comparisonSessions: List<ChargingSession> = emptyList(),
+    val guidedTest: GuidedChargingTestState = GuidedChargingTestState(),
+    val extendedRecordingActive: Boolean = false,
 ) {
     fun withReading(newReading: BatteryReading): DashboardState {
         val newPoint = newReading.powerWatts?.let {

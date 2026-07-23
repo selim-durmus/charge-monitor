@@ -27,7 +27,9 @@ class ChargingSessionStore(context: Context) :
                 ended_at INTEGER,
                 joined_in_progress INTEGER NOT NULL,
                 end_reason TEXT,
-                initial_source TEXT NOT NULL
+                initial_source TEXT NOT NULL,
+                accessory_id TEXT,
+                accessory_name TEXT
             )
             """.trimIndent(),
         )
@@ -49,6 +51,7 @@ class ChargingSessionStore(context: Context) :
                 level INTEGER,
                 temperature REAL,
                 thermal_status TEXT NOT NULL,
+                thermal_headroom_30 REAL,
                 charge_state TEXT NOT NULL,
                 power_source TEXT NOT NULL,
                 charging_profile TEXT,
@@ -74,7 +77,15 @@ class ChargingSessionStore(context: Context) :
         db.execSQL("CREATE INDEX events_by_session ON events(session_id, timestamp)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE samples ADD COLUMN thermal_headroom_30 REAL")
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE sessions ADD COLUMN accessory_id TEXT")
+            db.execSQL("ALTER TABLE sessions ADD COLUMN accessory_name TEXT")
+        }
+    }
 
     fun insertSession(session: ChargingSession) {
         writableDatabase.insertOrThrow(
@@ -87,6 +98,8 @@ class ChargingSessionStore(context: Context) :
                 put("joined_in_progress", if (session.joinedInProgress) 1 else 0)
                 putNullable("end_reason", session.endReason?.name)
                 put("initial_source", session.initialSource.name)
+                putNullable("accessory_id", session.accessoryId)
+                putNullable("accessory_name", session.accessoryName)
             },
         )
         trimToLatestSessions()
@@ -98,6 +111,8 @@ class ChargingSessionStore(context: Context) :
             ContentValues().apply {
                 putNullable("ended_at", session.endedAtMillis)
                 putNullable("end_reason", session.endReason?.name)
+                putNullable("accessory_id", session.accessoryId)
+                putNullable("accessory_name", session.accessoryName)
             },
             "id = ?",
             arrayOf(session.id),
@@ -123,6 +138,10 @@ class ChargingSessionStore(context: Context) :
                 putNullable("level", sample.levelPercent)
                 putNullable("temperature", sample.temperatureCelsius)
                 put("thermal_status", sample.thermalStatus.name)
+                putNullable(
+                    "thermal_headroom_30",
+                    sample.thermalHeadroomForecast30Seconds,
+                )
                 put("charge_state", sample.chargeState.name)
                 put("power_source", sample.powerSource.name)
                 putNullable("charging_profile", sample.chargingProfile?.name)
@@ -187,6 +206,8 @@ class ChargingSessionStore(context: Context) :
                     ?.enumValueOrNull<SessionEndReason>(),
                 initialSource = cursor.string("initial_source").enumValueOrNull<PowerSource>()
                     ?: PowerSource.UNKNOWN,
+                accessoryId = cursor.nullableString("accessory_id"),
+                accessoryName = cursor.nullableString("accessory_name"),
             )
         }
 
@@ -219,6 +240,8 @@ class ChargingSessionStore(context: Context) :
                                 .string("thermal_status")
                                 .enumValueOrNull<ThermalStatus>()
                                 ?: ThermalStatus.UNKNOWN,
+                            thermalHeadroomForecast30Seconds = cursor
+                                .nullableDouble("thermal_headroom_30"),
                             chargeState = cursor
                                 .string("charge_state")
                                 .enumValueOrNull<ChargeState>()
@@ -270,6 +293,8 @@ class ChargingSessionStore(context: Context) :
             joinedInProgress = metadata.joinedInProgress,
             endReason = metadata.endReason,
             initialSource = metadata.initialSource,
+            accessoryId = metadata.accessoryId,
+            accessoryName = metadata.accessoryName,
             samples = samples,
             events = events,
         )
@@ -293,11 +318,13 @@ class ChargingSessionStore(context: Context) :
         val joinedInProgress: Boolean,
         val endReason: SessionEndReason?,
         val initialSource: PowerSource,
+        val accessoryId: String?,
+        val accessoryName: String?,
     )
 
     companion object {
         private const val DATABASE_NAME = "charging_sessions.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 3
 
         private val SESSION_COLUMNS = arrayOf(
             "id",
@@ -306,6 +333,8 @@ class ChargingSessionStore(context: Context) :
             "joined_in_progress",
             "end_reason",
             "initial_source",
+            "accessory_id",
+            "accessory_name",
         )
         private val SAMPLE_COLUMNS = arrayOf(
             "timestamp",
@@ -321,6 +350,7 @@ class ChargingSessionStore(context: Context) :
             "level",
             "temperature",
             "thermal_status",
+            "thermal_headroom_30",
             "charge_state",
             "power_source",
             "charging_profile",

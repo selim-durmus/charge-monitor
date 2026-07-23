@@ -1,14 +1,19 @@
 package com.nicky.chargemonitor
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -21,6 +26,19 @@ import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val chargingViewModel: ChargingViewModel by viewModels()
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            chargingViewModel.startExtendedRecording()
+        } else {
+            Toast.makeText(
+                this,
+                "Notification permission is required for screen-off recording",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,8 +58,30 @@ class MainActivity : ComponentActivity() {
                     onSelectSession = chargingViewModel::selectSession,
                     onClearSelectedSession = chargingViewModel::clearSelectedSession,
                     onShareSession = ::exportAndShareSession,
+                    onNameAccessory = chargingViewModel::saveCurrentAccessoryName,
+                    onSelectComparison = chargingViewModel::selectComparison,
+                    onClearComparison = chargingViewModel::clearComparison,
+                    onBeginGuidedTest = chargingViewModel::beginGuidedTest,
+                    onArmGuidedTest = chargingViewModel::armGuidedTestPhase,
+                    onFinishGuidedTestPhase = chargingViewModel::finishGuidedTestPhase,
+                    onCancelGuidedTest = chargingViewModel::cancelGuidedTest,
+                    onStartExtendedRecording = ::requestExtendedRecording,
+                    onStopExtendedRecording = chargingViewModel::stopExtendedRecording,
                 )
             }
+        }
+    }
+
+    private fun requestExtendedRecording() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            chargingViewModel.startExtendedRecording()
         }
     }
 

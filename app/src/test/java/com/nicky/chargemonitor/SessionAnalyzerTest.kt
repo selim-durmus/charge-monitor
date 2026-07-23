@@ -54,7 +54,7 @@ class SessionAnalyzerTest {
     @Test
     fun `long life limit near eighty percent takes precedence over warm temperature`() {
         val session = sampleSession(
-            powers = List(12) { 1.0 },
+            powers = List(12) { -1.0 },
             temperatureCelsius = 41.0,
             chargingProfile = ChargingProfile.LONG_LIFE,
             startingLevelPercent = 78,
@@ -80,6 +80,8 @@ private fun sampleSession(
     joinedInProgress = false,
     endReason = null,
     initialSource = PowerSource.USB,
+    accessoryId = null,
+    accessoryName = null,
     samples = powers.mapIndexed { index, power ->
         DiagnosticSample(
             timestampMillis = 1_000_000L + (index + 1) * 1_000L,
@@ -95,6 +97,7 @@ private fun sampleSession(
             levelPercent = (startingLevelPercent + index / 6).coerceAtMost(100),
             temperatureCelsius = temperatureCelsius,
             thermalStatus = thermalStatus,
+            thermalHeadroomForecast30Seconds = null,
             chargeState = ChargeState.CHARGING,
             powerSource = PowerSource.USB,
             chargingProfile = chargingProfile,

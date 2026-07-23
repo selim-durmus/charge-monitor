@@ -12,9 +12,13 @@ class AndroidBatteryMonitor(context: Context) {
     private val appContext = context.applicationContext
     private val batteryManager = appContext.getSystemService(BatteryManager::class.java)
     private val powerManager = appContext.getSystemService(PowerManager::class.java)
+    private var lastThermalHeadroomReadAtMillis = Long.MIN_VALUE
+    private var cachedThermalHeadroomForecast: Double? = null
 
     @Suppress("DEPRECATION")
+    @Synchronized
     fun read(): BatteryReading {
+        val elapsedRealtimeMillis = SystemClock.elapsedRealtime()
         val batteryIntent = appContext.registerReceiver(
             null,
             IntentFilter(Intent.ACTION_BATTERY_CHANGED),
@@ -42,7 +46,7 @@ class AndroidBatteryMonitor(context: Context) {
             ?.takeIf { it.isNotBlank() }
 
         return BatteryReading(
-            elapsedRealtimeMillis = SystemClock.elapsedRealtime(),
+            elapsedRealtimeMillis = elapsedRealtimeMillis,
             chargeState = status.toChargeState(),
             powerSource = plugged.toPowerSource(),
             levelPercent = levelPercent,
@@ -79,7 +83,26 @@ class AndroidBatteryMonitor(context: Context) {
                 ?.intExtraOrNull(EXTRA_MAX_CHARGING_VOLTAGE)
                 ?.takeIf { it > 0 },
             thermalStatus = powerManager.currentThermalStatus.toThermalStatus(),
+            thermalHeadroomForecast30Seconds = thermalHeadroomForecast(
+                elapsedRealtimeMillis = elapsedRealtimeMillis,
+            ),
         )
+    }
+
+    private fun thermalHeadroomForecast(elapsedRealtimeMillis: Long): Double? {
+        if (lastThermalHeadroomReadAtMillis == Long.MIN_VALUE ||
+            elapsedRealtimeMillis - lastThermalHeadroomReadAtMillis >=
+                THERMAL_HEADROOM_INTERVAL_MILLIS
+        ) {
+            lastThermalHeadroomReadAtMillis = elapsedRealtimeMillis
+            runCatching {
+                powerManager.getThermalHeadroom(THERMAL_FORECAST_SECONDS)
+            }.getOrNull()
+                ?.takeIf { it.isFinite() }
+                ?.toDouble()
+                ?.let { cachedThermalHeadroomForecast = it }
+        }
+        return cachedThermalHeadroomForecast
     }
 
     private fun intProperty(property: Int): Int? =
@@ -96,6 +119,8 @@ class AndroidBatteryMonitor(context: Context) {
 // for third-party apps, so they are treated as optional capability hints.
 private const val EXTRA_MAX_CHARGING_CURRENT = "max_charging_current"
 private const val EXTRA_MAX_CHARGING_VOLTAGE = "max_charging_voltage"
+private const val THERMAL_HEADROOM_INTERVAL_MILLIS = 1_000L
+private const val THERMAL_FORECAST_SECONDS = 30
 
 private fun Int.toChargeState(): ChargeState = when (this) {
     BatteryManager.BATTERY_STATUS_CHARGING -> ChargeState.CHARGING

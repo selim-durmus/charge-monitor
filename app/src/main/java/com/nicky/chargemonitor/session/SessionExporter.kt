@@ -37,13 +37,15 @@ class SessionExporter(context: Context) {
     private fun ChargingSession.toJson(): JSONObject {
         val summary = SessionAnalyzer.summarize(this)
         return JSONObject().apply {
-            put("schemaVersion", 1)
+            put("schemaVersion", 2)
             put("sessionId", id)
             put("startedAt", startedAtMillis.toIsoTimestamp())
             putNullable("endedAt", endedAtMillis?.toIsoTimestamp())
             put("joinedInProgress", joinedInProgress)
             putNullable("endReason", endReason?.name)
             put("initialSource", initialSource.name)
+            putNullable("accessoryId", accessoryId)
+            putNullable("accessoryName", accessoryName)
             put(
                 "summary",
                 JSONObject().apply {
@@ -57,6 +59,10 @@ class SessionExporter(context: Context) {
                     putNullable("minimumPowerWatts", summary.minimumPowerWatts)
                     putNullable("maximumPowerWatts", summary.maximumPowerWatts)
                     putNullable("peakTemperatureCelsius", summary.peakTemperatureCelsius)
+                    putNullable(
+                        "peakThermalHeadroomForecast30Seconds",
+                        summary.peakThermalHeadroomForecast,
+                    )
                     put("thermalLimitedSeconds", summary.thermalLimitedSeconds)
                     putNullable("chargingProfile", summary.chargingProfile?.name)
                     putNullable("sourceCeilingWatts", summary.sourceCeilingWatts)
@@ -101,6 +107,10 @@ class SessionExporter(context: Context) {
                                 putNullable("levelPercent", sample.levelPercent)
                                 putNullable("temperatureCelsius", sample.temperatureCelsius)
                                 put("thermalStatus", sample.thermalStatus.name)
+                                putNullable(
+                                    "thermalHeadroomForecast30Seconds",
+                                    sample.thermalHeadroomForecast30Seconds,
+                                )
                                 put("chargeState", sample.chargeState.name)
                                 put("powerSource", sample.powerSource.name)
                                 putNullable("chargingProfile", sample.chargingProfile?.name)
@@ -143,8 +153,11 @@ class SessionExporter(context: Context) {
                 "battery_percent",
                 "temperature_c",
                 "thermal_status",
+                "thermal_headroom_30s",
                 "charge_state",
                 "power_source",
+                "accessory_id",
+                "accessory_name",
                 "charging_profile",
                 "source_ceiling_w",
                 "charge_counter_mah",
@@ -170,8 +183,11 @@ class SessionExporter(context: Context) {
                     sample.levelPercent,
                     sample.temperatureCelsius,
                     sample.thermalStatus.name,
+                    sample.thermalHeadroomForecast30Seconds,
                     sample.chargeState.name,
                     sample.powerSource.name,
+                    accessoryId,
+                    accessoryName,
                     sample.chargingProfile?.name,
                     sample.sourceCeilingWatts,
                     sample.chargeCounterMilliampHours,
@@ -187,7 +203,7 @@ class SessionExporter(context: Context) {
                     event.timestampMillis.toIsoTimestamp(),
                     event.timestampMillis - startedAtMillis,
                     event.label,
-                ).toCsvRow(totalColumns = 22),
+                ).toCsvRow(totalColumns = 25),
             )
         }
     }

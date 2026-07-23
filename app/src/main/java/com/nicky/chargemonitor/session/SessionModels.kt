@@ -46,6 +46,7 @@ data class DiagnosticSample(
     val levelPercent: Int?,
     val temperatureCelsius: Double?,
     val thermalStatus: ThermalStatus,
+    val thermalHeadroomForecast30Seconds: Double?,
     val chargeState: ChargeState,
     val powerSource: PowerSource,
     val chargingProfile: ChargingProfile?,
@@ -62,6 +63,8 @@ data class ChargingSession(
     val joinedInProgress: Boolean,
     val endReason: SessionEndReason?,
     val initialSource: PowerSource,
+    val accessoryId: String?,
+    val accessoryName: String?,
     val samples: List<DiagnosticSample>,
     val events: List<SessionEvent>,
 ) {
@@ -88,6 +91,8 @@ data class ChargingSessionSummary(
     val joinedInProgress: Boolean,
     val endReason: SessionEndReason?,
     val source: PowerSource,
+    val accessoryId: String?,
+    val accessoryName: String?,
     val durationMillis: Long,
     val sampleCount: Int,
     val startLevelPercent: Int?,
@@ -98,6 +103,7 @@ data class ChargingSessionSummary(
     val minimumPowerWatts: Double?,
     val maximumPowerWatts: Double?,
     val peakTemperatureCelsius: Double?,
+    val peakThermalHeadroomForecast: Double?,
     val thermalLimitedSeconds: Int,
     val chargingProfile: ChargingProfile?,
     val sourceCeilingWatts: Double?,
@@ -132,6 +138,8 @@ object SessionAnalyzer {
             joinedInProgress = session.joinedInProgress,
             endReason = session.endReason,
             source = samples.firstOrNull()?.powerSource ?: session.initialSource,
+            accessoryId = session.accessoryId,
+            accessoryName = session.accessoryName,
             durationMillis = (endTimestamp - session.startedAtMillis).coerceAtLeast(0L),
             sampleCount = samples.size,
             startLevelPercent = samples.firstNotNullOfOrNull { it.levelPercent },
@@ -142,6 +150,9 @@ object SessionAnalyzer {
             minimumPowerWatts = samples.mapNotNull { it.powerMinimumWatts }.minOrNull(),
             maximumPowerWatts = samples.mapNotNull { it.powerMaximumWatts }.maxOrNull(),
             peakTemperatureCelsius = peakTemperature,
+            peakThermalHeadroomForecast = samples
+                .mapNotNull { it.thermalHeadroomForecast30Seconds }
+                .maxOrNull(),
             thermalLimitedSeconds = thermalLimitedSeconds,
             chargingProfile = samples
                 .asReversed()
@@ -166,15 +177,6 @@ object SessionAnalyzer {
             )
         }
 
-        val averagePower = summary.averagePowerWatts
-        if (averagePower != null && averagePower < -0.25) {
-            return SessionDiagnosis(
-                title = "Battery was still draining",
-                detail = "Phone demand exceeded incoming power during this trace.",
-                tone = DiagnosisTone.WARNING,
-            )
-        }
-
         if (summary.thermalLimitedSeconds > 0) {
             return SessionDiagnosis(
                 title = "Heat likely limited charging",
@@ -190,6 +192,23 @@ object SessionAnalyzer {
                 title = "Charge limit was active",
                 detail = "The long-life profile was holding the battery near its configured limit.",
                 tone = DiagnosisTone.GOOD,
+            )
+        }
+
+        val averagePower = summary.averagePowerWatts
+        if (averagePower != null && averagePower < -0.25) {
+            return SessionDiagnosis(
+                title = "Battery was still draining",
+                detail = "Phone demand exceeded incoming power during this trace.",
+                tone = DiagnosisTone.WARNING,
+            )
+        }
+
+        if ((summary.peakThermalHeadroomForecast ?: 0.0) >= 1.0) {
+            return SessionDiagnosis(
+                title = "Thermal throttling was imminent",
+                detail = "Android's 30-second forecast reached the severe-throttling threshold.",
+                tone = DiagnosisTone.WARNING,
             )
         }
 

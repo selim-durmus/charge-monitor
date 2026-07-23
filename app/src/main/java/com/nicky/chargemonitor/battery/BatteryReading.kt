@@ -74,6 +74,7 @@ data class BatteryReading(
     val sourceMaxCurrentMicroamps: Int?,
     val sourceMaxVoltageMicrovolts: Int?,
     val thermalStatus: ThermalStatus,
+    val thermalHeadroomForecast30Seconds: Double?,
 ) {
     val voltageVolts: Double?
         get() = voltageMillivolts?.div(1_000.0)
