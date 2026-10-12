@@ -11,15 +11,32 @@ android {
         applicationId = "com.nicky.chargemonitor"
         minSdk = 31
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Release signing is configured outside the repo, in ~/.gradle/gradle.properties:
+    //   chargeMonitorKeystore, chargeMonitorKeystorePassword, chargeMonitorKeyAlias
+    // Without them, assembleRelease still works but produces an unsigned APK.
+    val releaseKeystore = providers.gradleProperty("chargeMonitorKeystore").orNull
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = providers.gradleProperty("chargeMonitorKeystorePassword").get()
+                keyAlias = providers.gradleProperty("chargeMonitorKeyAlias").get()
+                keyPassword = storePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
