@@ -19,6 +19,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.nicky.chargemonitor.session.SessionExportFormat
+import com.nicky.chargemonitor.ui.ChargeMonitorActions
 import com.nicky.chargemonitor.ui.ChargeMonitorApp
 import com.nicky.chargemonitor.ui.theme.ChargeMonitorTheme
 import kotlinx.coroutines.launch
@@ -50,24 +51,23 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val actions = ChargeMonitorActions(
+            selectSession = chargingViewModel::selectSession,
+            shareSession = ::exportAndShareSession,
+            nameAccessory = chargingViewModel::saveCurrentAccessoryName,
+            selectComparison = chargingViewModel::selectComparison,
+            beginGuidedTest = chargingViewModel::beginGuidedTest,
+            armGuidedTest = chargingViewModel::armGuidedTestPhase,
+            finishGuidedTestWindow = chargingViewModel::finishGuidedTestPhase,
+            cancelGuidedTest = chargingViewModel::cancelGuidedTest,
+            startExtendedRecording = ::requestExtendedRecording,
+            stopExtendedRecording = chargingViewModel::stopExtendedRecording,
+        )
+
         setContent {
             ChargeMonitorTheme {
                 val state by chargingViewModel.state.collectAsStateWithLifecycle()
-                ChargeMonitorApp(
-                    state = state,
-                    onSelectSession = chargingViewModel::selectSession,
-                    onClearSelectedSession = chargingViewModel::clearSelectedSession,
-                    onShareSession = ::exportAndShareSession,
-                    onNameAccessory = chargingViewModel::saveCurrentAccessoryName,
-                    onSelectComparison = chargingViewModel::selectComparison,
-                    onClearComparison = chargingViewModel::clearComparison,
-                    onBeginGuidedTest = chargingViewModel::beginGuidedTest,
-                    onArmGuidedTest = chargingViewModel::armGuidedTestPhase,
-                    onFinishGuidedTestPhase = chargingViewModel::finishGuidedTestPhase,
-                    onCancelGuidedTest = chargingViewModel::cancelGuidedTest,
-                    onStartExtendedRecording = ::requestExtendedRecording,
-                    onStopExtendedRecording = chargingViewModel::stopExtendedRecording,
-                )
+                ChargeMonitorApp(state = state, actions = actions)
             }
         }
     }

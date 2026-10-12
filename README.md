@@ -1,6 +1,18 @@
 # Charge Monitor
 
-A fast Android charging dashboard and diagnostic recorder designed for an unrooted Pixel 10. It distinguishes wired, USB, wireless, and dock power sources and presents the battery data exposed by Android in a polished live energy-console UI.
+A fast Android charging dashboard and diagnostic recorder designed for an unrooted Pixel 10. It distinguishes wired, USB, wireless, and dock power sources and presents the battery data exposed by Android in a focused Material 3 interface that follows the
+system light or dark theme.
+
+## Layout
+
+- **Live** — one battery ring with net watts at its centre, a 30-second power chart, current /
+  voltage / temperature, and a single card for the connected charger, the session being recorded,
+  and screen-off recording. Secondary battery facts sit in a collapsed "Battery details" card. A
+  warning banner appears only when Android reports throttling or forecasts it within 30 seconds.
+- **Sessions** — the last five charging sessions with a one-line verdict each, plus Compare (pick
+  two) and the guided A/B charger test. Tapping a session opens its report: likely cause, key stats,
+  a power + temperature trace with labelled axes and event markers, details, events, and CSV/JSON
+  sharing.
 
 ## What it shows
 
@@ -17,7 +29,8 @@ A fast Android charging dashboard and diagnostic recorder designed for an unroot
 - Five-session history with power/temperature graphs, event markers, and likely-cause analysis
 - Named charger/pad profiles with baselines built from comparable cool, lower-charge samples
 - Side-by-side normalized session comparison with a test-confidence score
-- A guided five-minute A/B workflow for testing two chargers, cables, or pads under similar conditions
+- A guided A/B workflow for testing two chargers, cables, or pads under similar conditions; each
+  window closes automatically at five minutes and the screen stays on while it runs
 - Optional user-started recording while the display is off
 - JSON and CSV session sharing
 
@@ -54,7 +67,8 @@ GRADLE_USER_HOME="$PWD/.local-tooling/gradle-home" \
 "$PWD/.local-tooling/gradle/bin/gradle" testDebugUnitTest assembleDebug
 ```
 
-On a machine with JDK 17 and an Android SDK configured globally, use the checked-in wrapper:
+On a machine with JDK 17 and an Android SDK configured globally (or `sdk.dir` set in an ignored
+`local.properties`), use the checked-in wrapper:
 
 ```sh
 ./gradlew testDebugUnitTest assembleDebug

@@ -4,6 +4,7 @@ import com.nicky.chargemonitor.battery.BatteryReading
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 data class ExtendedRecordingStatus(
     val active: Boolean = false,
@@ -12,35 +13,43 @@ data class ExtendedRecordingStatus(
     val lastReading: BatteryReading? = null,
 )
 
+/**
+ * Shared between the main thread (dashboard lifecycle) and the service's IO sampling loop,
+ * so every mutation goes through [MutableStateFlow.update] to stay atomic.
+ */
 class ExtendedRecordingController {
     private val mutableStatus = MutableStateFlow(ExtendedRecordingStatus())
     val status: StateFlow<ExtendedRecordingStatus> = mutableStatus.asStateFlow()
 
     fun prepareToStart() {
-        mutableStatus.value = mutableStatus.value.copy(active = true)
+        mutableStatus.update { it.copy(active = true) }
     }
 
     fun dashboardStarted() {
-        mutableStatus.value = mutableStatus.value.copy(dashboardSamplingActive = true)
+        mutableStatus.update { it.copy(dashboardSamplingActive = true) }
     }
 
     fun dashboardStopped() {
-        mutableStatus.value = mutableStatus.value.copy(dashboardSamplingActive = false)
+        mutableStatus.update { it.copy(dashboardSamplingActive = false) }
     }
 
     fun publish(reading: BatteryReading) {
-        val previous = mutableStatus.value
-        mutableStatus.value = previous.copy(
-            active = true,
-            revision = previous.revision + 1L,
-            lastReading = reading,
-        )
+        mutableStatus.update {
+            it.copy(
+                active = true,
+                revision = it.revision + 1L,
+                lastReading = reading,
+            )
+        }
     }
 
     fun stopped() {
-        mutableStatus.value = mutableStatus.value.copy(
-            active = false,
-            lastReading = null,
-        )
+        mutableStatus.update {
+            it.copy(
+                active = false,
+                revision = it.revision + 1L,
+                lastReading = null,
+            )
+        }
     }
 }

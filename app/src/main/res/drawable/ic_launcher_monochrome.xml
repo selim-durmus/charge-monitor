@@ -1,10 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer: same ring and bolt as the foreground, single color. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
+        android:fillColor="#00000000"
+        android:pathData="M33,54a21,21 0,1 1,42 0a21,21 0,1 1,-42 0"
+        android:strokeAlpha="0.3"
+        android:strokeWidth="6.5"
+        android:strokeColor="#FFFFFFFF" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,33A21,21 0,1 1,33 54"
+        android:strokeWidth="6.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round" />
+    <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M49,29L70,29L58,49L69,49L42,80L50,57L39,57Z" />
+        android:pathData="M56.4,42L45.6,56.4h8.4l-1.2,9.6l10.8,-14.4h-8.4l1.2,-9.6z"
+        android:strokeWidth="1.2"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="round" />
 </vector>

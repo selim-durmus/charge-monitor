@@ -17,6 +17,8 @@ class ChargingSessionRecorder(context: Context) {
     private var accumulator: SampleAccumulator? = null
     private var previousState: ReadingState? = null
     private var lastPowerConnected: Boolean? = null
+    private val summaryCache = HashMap<String, Pair<ChargingSession, ChargingSessionSummary>>()
+    private var baselineCache: Pair<List<ChargingSession>, Map<String, AccessoryBaseline>>? = null
 
     @Synchronized
     fun record(
@@ -94,9 +96,25 @@ class ChargingSessionRecorder(context: Context) {
         return true
     }
 
+    /**
+     * Called about once per second while recording. Finished sessions never change, so their
+     * summaries are cached by instance identity and only the active session is re-analyzed.
+     */
     @Synchronized
-    fun summaries(): List<ChargingSessionSummary> =
-        sessions.sortedByDescending { it.startedAtMillis }.map(SessionAnalyzer::summarize)
+    fun summaries(): List<ChargingSessionSummary> {
+        val ordered = sessions.sortedByDescending { it.startedAtMillis }
+        summaryCache.keys.retainAll(ordered.mapTo(HashSet()) { it.id })
+        return ordered.map { session ->
+            val cached = summaryCache[session.id]
+            if (cached != null && cached.first === session) {
+                cached.second
+            } else {
+                SessionAnalyzer.summarize(session).also {
+                    summaryCache[session.id] = session to it
+                }
+            }
+        }
+    }
 
     @Synchronized
     fun session(sessionId: String): ChargingSession? =
@@ -119,45 +137,21 @@ class ChargingSessionRecorder(context: Context) {
         }
     }
 
+    /**
+     * Baselines come from finished sessions only, so the live session is compared against
+     * history rather than against itself. The result is cached until a session finishes or
+     * is renamed.
+     */
     @Synchronized
-    fun accessoryBaselines(): Map<String, AccessoryBaseline> =
-        sessions
-            .filter { it.accessoryId != null }
-            .groupBy { requireNotNull(it.accessoryId) }
-            .mapNotNull { (accessoryId, matchingSessions) ->
-                val comparableSamples = matchingSessions.flatMap { session ->
-                    session.samples.filter { sample ->
-                        sample.elapsedMillis >= BASELINE_WARMUP_MILLIS &&
-                            (sample.levelPercent ?: 100) < BASELINE_MAX_BATTERY_PERCENT &&
-                            sample.chargingProfile != ChargingProfile.LONG_LIFE &&
-                            sample.thermalStatus.severity < ThermalStatus.MODERATE.severity &&
-                            (sample.powerAverageWatts ?: 0.0) > 0.0
-                    }
-                }
-                val powers = comparableSamples
-                    .mapNotNull { it.powerAverageWatts }
-                    .sorted()
-                if (powers.size < MINIMUM_BASELINE_BUCKETS) {
-                    null
-                } else {
-                    AccessoryBaseline(
-                        accessoryId = accessoryId,
-                        sessionCount = matchingSessions.count { session ->
-                            session.samples.any(comparableSamples::contains)
-                        },
-                        comparableBucketCount = powers.size,
-                        averagePowerWatts = powers.average(),
-                        medianPowerWatts = powers.percentile(0.50),
-                        tenthPercentilePowerWatts = powers.percentile(0.10),
-                        peakPowerWatts = matchingSessions
-                            .flatMap { it.samples }
-                            .mapNotNull { it.powerMaximumWatts }
-                            .maxOrNull()
-                            ?: powers.last(),
-                    )
-                }
+    fun accessoryBaselines(): Map<String, AccessoryBaseline> {
+        val finished = sessions.filterNot { it.isActive }
+        baselineCache?.let { (key, value) ->
+            if (key.size == finished.size && key.indices.all { key[it] === finished[it] }) {
+                return value
             }
-            .associateBy { it.accessoryId }
+        }
+        return accessoryBaselinesFor(finished).also { baselineCache = finished to it }
+    }
 
     private fun startOrResumeSession(
         reading: BatteryReading,
@@ -430,6 +424,48 @@ private fun PowerSource.shortLabel(): String = when (this) {
 }
 
 private fun ChargingProfile?.profileLabel(): String = this?.label ?: "System managed"
+
+internal fun accessoryBaselinesFor(
+    finished: List<ChargingSession>,
+): Map<String, AccessoryBaseline> =
+    finished
+        .filter { it.accessoryId != null }
+        .groupBy { requireNotNull(it.accessoryId) }
+        .mapNotNull { (accessoryId, matchingSessions) ->
+            val comparableBySession = matchingSessions.map { session ->
+                session.samples.filter(DiagnosticSample::isBaselineComparable)
+            }
+            val powers = comparableBySession
+                .flatten()
+                .mapNotNull { it.powerAverageWatts }
+                .sorted()
+            if (powers.size < MINIMUM_BASELINE_BUCKETS) {
+                null
+            } else {
+                AccessoryBaseline(
+                    accessoryId = accessoryId,
+                    sessionCount = comparableBySession.count { it.isNotEmpty() },
+                    comparableBucketCount = powers.size,
+                    averagePowerWatts = powers.average(),
+                    medianPowerWatts = powers.percentile(0.50),
+                    tenthPercentilePowerWatts = powers.percentile(0.10),
+                    peakPowerWatts = matchingSessions
+                        .flatMap { it.samples }
+                        .mapNotNull { it.powerMaximumWatts }
+                        .maxOrNull()
+                        ?: powers.last(),
+                )
+            }
+        }
+        .associateBy { it.accessoryId }
+
+/** Cool, lower-charge, unthrottled samples where the charger rather than taper sets the pace. */
+internal fun DiagnosticSample.isBaselineComparable(): Boolean =
+    elapsedMillis >= BASELINE_WARMUP_MILLIS &&
+        (levelPercent ?: 100) < BASELINE_MAX_BATTERY_PERCENT &&
+        chargingProfile != ChargingProfile.LONG_LIFE &&
+        thermalStatus.severity < ThermalStatus.MODERATE.severity &&
+        (powerAverageWatts ?: 0.0) > 0.0
 
 private fun List<Double>.averageOrNull(): Double? =
     if (isEmpty()) null else average()

@@ -19,7 +19,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -52,15 +55,19 @@ class DiagnosticRecordingService : Service() {
     }
 
     override fun onDestroy() {
-        samplingJob?.cancel()
-        if (!chargeMonitorApplication.extendedRecordingController.status.value
-                .dashboardSamplingActive
-        ) {
-            chargeMonitorApplication.sessionRecorder.onForegroundStopped(
-                System.currentTimeMillis(),
-            )
+        val app = chargeMonitorApplication
+        val job = samplingJob
+        samplingJob = null
+        // The sampling loop may be between read() and record() right now. Finishing the
+        // session synchronously here could let that in-flight record() open a phantom
+        // session that never ends, so wait for the loop to settle first (off the main thread).
+        app.applicationScope.launch {
+            job?.cancelAndJoin()
+            if (!app.extendedRecordingController.status.value.dashboardSamplingActive) {
+                app.sessionRecorder.onForegroundStopped(System.currentTimeMillis())
+            }
+            app.extendedRecordingController.stopped()
         }
-        chargeMonitorApplication.extendedRecordingController.stopped()
         wakeLock?.takeIf { it.isHeld }?.release()
         wakeLock = null
         serviceScope.cancel()
@@ -70,10 +77,11 @@ class DiagnosticRecordingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private suspend fun samplingLoop() {
-        while (serviceScope.isActive) {
+        while (currentCoroutineContext().isActive) {
             val startedAt = android.os.SystemClock.elapsedRealtime()
             val reading = chargeMonitorApplication.batteryMonitor.read()
             val accessory = chargeMonitorApplication.accessoryProfileStore.profileFor(reading)
+            currentCoroutineContext().ensureActive()
             chargeMonitorApplication.sessionRecorder.record(
                 reading = reading,
                 timestampMillis = System.currentTimeMillis(),
@@ -119,6 +127,7 @@ class DiagnosticRecordingService : Service() {
         content: String = "Preparing the screen-off diagnostic recorder…",
     ) = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_notification)
+        .setColor(NOTIFICATION_ACCENT)
         .setContentTitle("Charging diagnostic is recording")
         .setContentText(content)
         .setContentIntent(
@@ -173,6 +182,7 @@ class DiagnosticRecordingService : Service() {
         private const val NOTIFICATION_ID = 401
         private const val SERVICE_SAMPLE_INTERVAL_MILLIS = 1_000L
         private const val MAX_WAKE_LOCK_MILLIS = 12 * 60 * 60_000L
+        private const val NOTIFICATION_ACCENT = 0xFF0B8A58.toInt()
     }
 }
 

@@ -165,8 +165,9 @@ class SessionExporter(context: Context) {
                 "time_to_full_ms",
             ).joinToString(","),
         )
-        samples.forEach { sample ->
-            appendLine(
+        // Samples and events are interleaved by time so the CSV reads as one timeline.
+        val sampleRows = samples.map { sample ->
+            sample.timestampMillis to
                 listOf(
                     "sample",
                     sample.timestampMillis.toIsoTimestamp(),
@@ -193,23 +194,25 @@ class SessionExporter(context: Context) {
                     sample.chargeCounterMilliampHours,
                     sample.energyCounterWattHours,
                     sample.chargeTimeRemainingMillis,
-                ).toCsvRow(),
-            )
+                ).toCsvRow()
         }
-        events.forEach { event ->
-            appendLine(
+        val eventRows = events.map { event ->
+            event.timestampMillis to
                 listOf(
                     "event",
                     event.timestampMillis.toIsoTimestamp(),
                     event.timestampMillis - startedAtMillis,
                     event.label,
-                ).toCsvRow(totalColumns = 25),
-            )
+                ).toCsvRow(totalColumns = CSV_COLUMN_COUNT)
         }
+        (sampleRows + eventRows)
+            .sortedBy { it.first }
+            .forEach { appendLine(it.second) }
     }
 
     companion object {
         private const val EXPORT_MAX_AGE_MILLIS = 24 * 60 * 60_000L
+        private const val CSV_COLUMN_COUNT = 25
         private val FILE_STAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
     }
 }

@@ -14,6 +14,10 @@ class AccessoryProfileStore(context: Context) {
         Context.MODE_PRIVATE,
     )
 
+    // profileFor() runs on every 250 ms sample, so keep the parsed list in memory
+    // instead of re-reading and re-parsing the JSON each time.
+    private var cachedProfiles: List<AccessoryProfile>? = null
+
     @Synchronized
     fun profiles(): List<AccessoryProfile> = loadProfiles()
 
@@ -57,7 +61,10 @@ class AccessoryProfileStore(context: Context) {
         return profile
     }
 
-    private fun loadProfiles(): List<AccessoryProfile> {
+    private fun loadProfiles(): List<AccessoryProfile> =
+        cachedProfiles ?: parseProfiles().also { cachedProfiles = it }
+
+    private fun parseProfiles(): List<AccessoryProfile> {
         val raw = preferences.getString(KEY_PROFILES, null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
@@ -98,6 +105,7 @@ class AccessoryProfileStore(context: Context) {
         preferences.edit {
             putString(KEY_PROFILES, array.toString())
         }
+        cachedProfiles = profiles.toList()
     }
 
     companion object {

@@ -13,15 +13,19 @@ import com.nicky.chargemonitor.session.ChargingSession
 import com.nicky.chargemonitor.session.ChargingSessionSummary
 import com.nicky.chargemonitor.session.GuidedChargingTestState
 import com.nicky.chargemonitor.session.GuidedTestPhase
-import com.nicky.chargemonitor.session.GuidedTestRun
+import com.nicky.chargemonitor.session.SessionComparator
 import com.nicky.chargemonitor.session.SessionExportFormat
 import com.nicky.chargemonitor.session.SessionExporter
+import com.nicky.chargemonitor.session.advance
+import com.nicky.chargemonitor.session.arm
+import com.nicky.chargemonitor.session.finishWindow
 import com.nicky.chargemonitor.session.sliceForTest
 import com.nicky.chargemonitor.service.DiagnosticRecordingService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,25 +38,30 @@ import java.io.File
 class ChargingViewModel(application: Application) : AndroidViewModel(application) {
     private val chargeMonitorApplication = application as ChargeMonitorApplication
     private val batteryMonitor = chargeMonitorApplication.batteryMonitor
-    private val sessionRecorder = chargeMonitorApplication.sessionRecorder
+    private val sessionRecorder by lazy { chargeMonitorApplication.sessionRecorder }
     private val accessoryProfileStore = chargeMonitorApplication.accessoryProfileStore
     private val extendedRecordingController =
         chargeMonitorApplication.extendedRecordingController
     private val sessionExporter = SessionExporter(application)
-    private val mutableState = MutableStateFlow(
-        DashboardState(sessionSummaries = sessionRecorder.summaries()),
-    )
+    private val mutableState = MutableStateFlow(DashboardState())
+    private var comparisonJob: Job? = null
 
     val state: StateFlow<DashboardState> = mutableState.asStateFlow()
 
     init {
+        // Opening the database and loading up to five full traces is disk work; keep it
+        // off the main thread instead of doing it while the ViewModel is constructed.
+        viewModelScope.launch {
+            val snapshot = withContext(Dispatchers.IO) { recorderSnapshot(null) }
+            mutableState.update { it.withSessionSnapshot(snapshot) }
+        }
         viewModelScope.launch {
             extendedRecordingController.status.collect { recordingStatus ->
                 mutableState.update {
                     it.copy(extendedRecordingActive = recordingStatus.active)
                 }
                 if (recordingStatus.revision > 0L) {
-                    val selectedSessionId = mutableState.value.selectedSession?.id
+                    val selectedSessionId = mutableState.value.selectedSessionId
                     val snapshot = withContext(Dispatchers.IO) {
                         recorderSnapshot(selectedSessionId)
                     }
@@ -76,7 +85,7 @@ class ChargingViewModel(application: Application) : AndroidViewModel(application
         try {
             while (currentCoroutineContext().isActive) {
                 val sampleStartedAt = SystemClock.elapsedRealtime()
-                val selectedSessionId = mutableState.value.selectedSession?.id
+                val selectedSessionId = mutableState.value.selectedSessionId
                 val update = withContext(Dispatchers.IO) {
                     val reading = batteryMonitor.read()
                     val timestampMillis = System.currentTimeMillis()
@@ -103,15 +112,11 @@ class ChargingViewModel(application: Application) : AndroidViewModel(application
                     )
                 }
                 mutableState.update { current ->
-                    current.withReading(update.reading).copy(
+                    val withReading = current.withReading(update.reading).copy(
                         currentAccessory = update.accessoryProfile,
-                    ).let { withReading ->
-                        if (update.sessionSnapshot != null) {
-                            withReading.withSessionSnapshot(update.sessionSnapshot)
-                        } else {
-                            withReading
-                        }
-                    }
+                    )
+                    update.sessionSnapshot?.let(withReading::withSessionSnapshot)
+                        ?: withReading
                 }
                 advanceGuidedTest(update.reading, update.timestampMillis)
                 val sampleDuration = SystemClock.elapsedRealtime() - sampleStartedAt
@@ -119,7 +124,7 @@ class ChargingViewModel(application: Application) : AndroidViewModel(application
             }
         } finally {
             extendedRecordingController.dashboardStopped()
-            val selectedSessionId = mutableState.value.selectedSession?.id
+            val selectedSessionId = mutableState.value.selectedSessionId
             val sessionSnapshot = withContext(NonCancellable + Dispatchers.IO) {
                 if (!extendedRecordingController.status.value.active) {
                     sessionRecorder.onForegroundStopped(System.currentTimeMillis())
@@ -133,71 +138,46 @@ class ChargingViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun selectSession(sessionId: String) {
+        if (mutableState.value.selectedSessionId == sessionId) return
+        mutableState.update { it.copy(selectedSessionId = sessionId, selectedSession = null) }
         viewModelScope.launch {
             val session = withContext(Dispatchers.IO) {
                 sessionRecorder.session(sessionId)
             }
-            mutableState.update { it.copy(selectedSession = session) }
+            mutableState.update {
+                if (it.selectedSessionId == sessionId) it.copy(selectedSession = session) else it
+            }
         }
-    }
-
-    fun clearSelectedSession() {
-        mutableState.update { it.copy(selectedSession = null) }
     }
 
     fun selectComparison(sessionIds: List<String>) {
-        viewModelScope.launch {
-            val sessions = withContext(Dispatchers.IO) {
-                sessionIds.take(2).mapNotNull(sessionRecorder::session)
-            }
-            mutableState.update { it.copy(comparisonSessions = sessions) }
+        loadComparison {
+            sessionIds.take(2).mapNotNull(sessionRecorder::session)
         }
     }
 
-    fun clearComparison() {
-        mutableState.update { it.copy(comparisonSessions = emptyList()) }
-    }
-
     fun beginGuidedTest() {
+        comparisonJob?.cancel()
         mutableState.update {
             it.copy(
                 guidedTest = GuidedChargingTestState(phase = GuidedTestPhase.PREPARE_A),
                 comparisonSessions = emptyList(),
+                comparison = null,
+                comparisonLoading = false,
             )
         }
     }
 
     fun armGuidedTestPhase() {
         mutableState.update { state ->
-            if (state.reading?.isPowerConnected == true) return@update state
-            val nextPhase = when (state.guidedTest.phase) {
-                GuidedTestPhase.PREPARE_A -> GuidedTestPhase.WAITING_FOR_A
-                GuidedTestPhase.PREPARE_B -> GuidedTestPhase.WAITING_FOR_B
-                else -> return@update state
-            }
-            state.copy(guidedTest = state.guidedTest.copy(phase = nextPhase))
+            state.copy(
+                guidedTest = state.guidedTest.arm(state.reading?.isPowerConnected == true),
+            )
         }
     }
 
     fun finishGuidedTestPhase() {
-        val timestampMillis = System.currentTimeMillis()
-        var completedState: GuidedChargingTestState? = null
-        mutableState.update { state ->
-            val test = state.guidedTest
-            val updated = when (test.phase) {
-                GuidedTestPhase.RUNNING_A -> test.copy(
-                    phase = GuidedTestPhase.PREPARE_B,
-                    firstRun = test.firstRun?.copy(endedAtMillis = timestampMillis),
-                )
-                GuidedTestPhase.RUNNING_B -> test.copy(
-                    phase = GuidedTestPhase.COMPLETE,
-                    secondRun = test.secondRun?.copy(endedAtMillis = timestampMillis),
-                ).also { completedState = it }
-                else -> return@update state
-            }
-            state.copy(guidedTest = updated)
-        }
-        completedState?.let(::prepareGuidedComparison)
+        updateGuidedTest { it.finishWindow(System.currentTimeMillis()) }
     }
 
     fun cancelGuidedTest() {
@@ -208,12 +188,12 @@ class ChargingViewModel(application: Application) : AndroidViewModel(application
 
     fun saveCurrentAccessoryName(name: String) {
         val reading = mutableState.value.reading ?: return
-        if (!reading.isPowerConnected) return
+        if (!reading.isPowerConnected || name.isBlank()) return
         viewModelScope.launch {
             val update = withContext(Dispatchers.IO) {
                 val profile = accessoryProfileStore.saveName(reading, name)
                 sessionRecorder.renameAccessory(profile)
-                profile to recorderSnapshot(mutableState.value.selectedSession?.id)
+                profile to recorderSnapshot(mutableState.value.selectedSessionId)
             }
             mutableState.update {
                 it.copy(currentAccessory = update.first)
@@ -255,64 +235,67 @@ class ChargingViewModel(application: Application) : AndroidViewModel(application
         SessionSnapshot(
             summaries = sessionRecorder.summaries(),
             activeSessionId = sessionRecorder.activeSessionId(),
+            selectedSessionId = selectedSessionId,
             selectedSession = selectedSessionId?.let(sessionRecorder::session),
             accessoryBaselines = sessionRecorder.accessoryBaselines(),
         )
 
     private fun advanceGuidedTest(reading: BatteryReading, timestampMillis: Long) {
-        var completedState: GuidedChargingTestState? = null
-        mutableState.update { state ->
-            val test = state.guidedTest
-            val activeSessionId = state.activeSessionId
-            val updated = when {
-                test.phase == GuidedTestPhase.WAITING_FOR_A &&
-                    reading.isPowerConnected &&
-                    activeSessionId != null -> test.copy(
-                        phase = GuidedTestPhase.RUNNING_A,
-                        firstRun = GuidedTestRun(
-                            sessionId = activeSessionId,
-                            startedAtMillis = timestampMillis,
-                            endedAtMillis = null,
-                        ),
-                    )
-                test.phase == GuidedTestPhase.RUNNING_A && !reading.isPowerConnected ->
-                    test.copy(
-                        phase = GuidedTestPhase.PREPARE_B,
-                        firstRun = test.firstRun?.copy(endedAtMillis = timestampMillis),
-                    )
-                test.phase == GuidedTestPhase.WAITING_FOR_B &&
-                    reading.isPowerConnected &&
-                    activeSessionId != null -> test.copy(
-                        phase = GuidedTestPhase.RUNNING_B,
-                        secondRun = GuidedTestRun(
-                            sessionId = activeSessionId,
-                            startedAtMillis = timestampMillis,
-                            endedAtMillis = null,
-                        ),
-                    )
-                test.phase == GuidedTestPhase.RUNNING_B && !reading.isPowerConnected ->
-                    test.copy(
-                        phase = GuidedTestPhase.COMPLETE,
-                        secondRun = test.secondRun?.copy(endedAtMillis = timestampMillis),
-                    ).also { completedState = it }
-                else -> return@update state
-            }
-            state.copy(guidedTest = updated)
+        if (!mutableState.value.guidedTest.isActive) return
+        updateGuidedTest { test ->
+            test.advance(
+                isPowerConnected = reading.isPowerConnected,
+                activeSessionId = mutableState.value.activeSessionId,
+                timestampMillis = timestampMillis,
+            )
         }
-        completedState?.let(::prepareGuidedComparison)
+    }
+
+    private inline fun updateGuidedTest(
+        transform: (GuidedChargingTestState) -> GuidedChargingTestState,
+    ) {
+        val before = mutableState.value.guidedTest
+        val after = transform(before)
+        if (after == before) return
+        mutableState.update { it.copy(guidedTest = after) }
+        if (after.phase == GuidedTestPhase.COMPLETE && before.phase != GuidedTestPhase.COMPLETE) {
+            prepareGuidedComparison(after)
+        }
     }
 
     private fun prepareGuidedComparison(test: GuidedChargingTestState) {
         val firstRun = test.firstRun ?: return
         val secondRun = test.secondRun ?: return
-        viewModelScope.launch {
-            val sessions = withContext(Dispatchers.IO) {
-                listOfNotNull(
-                    sessionRecorder.session(firstRun.sessionId)?.sliceForTest(firstRun),
-                    sessionRecorder.session(secondRun.sessionId)?.sliceForTest(secondRun),
+        loadComparison {
+            listOfNotNull(
+                sessionRecorder.session(firstRun.sessionId)?.sliceForTest(firstRun),
+                sessionRecorder.session(secondRun.sessionId)?.sliceForTest(secondRun),
+            )
+        }
+    }
+
+    /** Loads sessions and runs the comparison off the main thread, once. */
+    private fun loadComparison(loadSessions: () -> List<ChargingSession>) {
+        comparisonJob?.cancel()
+        mutableState.update {
+            it.copy(comparisonSessions = emptyList(), comparison = null, comparisonLoading = true)
+        }
+        comparisonJob = viewModelScope.launch {
+            val sessions = withContext(Dispatchers.IO) { loadSessions() }
+            val comparison = if (sessions.size == 2) {
+                withContext(Dispatchers.Default) {
+                    SessionComparator.compare(sessions[0], sessions[1])
+                }
+            } else {
+                null
+            }
+            mutableState.update {
+                it.copy(
+                    comparisonSessions = sessions,
+                    comparison = comparison,
+                    comparisonLoading = false,
                 )
             }
-            mutableState.update { it.copy(comparisonSessions = sessions) }
         }
     }
 }
@@ -327,13 +310,23 @@ private data class MonitorUpdate(
 private data class SessionSnapshot(
     val summaries: List<ChargingSessionSummary>,
     val activeSessionId: String?,
+    val selectedSessionId: String?,
     val selectedSession: ChargingSession?,
     val accessoryBaselines: Map<String, AccessoryBaseline>,
 )
 
 private fun DashboardState.withSessionSnapshot(snapshot: SessionSnapshot): DashboardState = copy(
+    sessionsLoaded = true,
     sessionSummaries = snapshot.summaries,
     activeSessionId = snapshot.activeSessionId,
-    selectedSession = snapshot.selectedSession,
+    // A snapshot only refreshes the open report if it was taken for that same report;
+    // otherwise a snapshot started before the user tapped a session would blank it out.
+    selectedSession = if (
+        snapshot.selectedSessionId != null && snapshot.selectedSessionId == selectedSessionId
+    ) {
+        snapshot.selectedSession
+    } else {
+        selectedSession
+    },
     currentAccessoryBaseline = currentAccessory?.id?.let(snapshot.accessoryBaselines::get),
 )

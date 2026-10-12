@@ -196,6 +196,18 @@ object SessionAnalyzer {
         }
 
         val averagePower = summary.averagePowerWatts
+        // A full battery on a charger hovers around 0 W (often slightly negative while the
+        // charger only tops up), which must not be mistaken for a weak or failing source.
+        val endedFull = session.samples.lastOrNull()?.chargeState == ChargeState.FULL ||
+            (summary.endLevelPercent ?: 0) >= 100
+        if (endedFull && averagePower != null && averagePower < FULL_BATTERY_MAX_WATTS) {
+            return SessionDiagnosis(
+                title = "Battery was full",
+                detail = "Power falls to near zero at 100%; the charger was only topping up.",
+                tone = DiagnosisTone.GOOD,
+            )
+        }
+
         if (averagePower != null && averagePower < -0.25) {
             return SessionDiagnosis(
                 title = "Battery was still draining",
@@ -301,4 +313,6 @@ object SessionAnalyzer {
 
     private fun List<Double>.averageOrNull(): Double? =
         if (isEmpty()) null else average()
+
+    private const val FULL_BATTERY_MAX_WATTS = 1.0
 }

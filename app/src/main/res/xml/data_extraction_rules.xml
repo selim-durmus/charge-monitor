@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
-    <!-- The live dashboard stores no user data, so there is nothing to back up. -->
+    <!-- Session traces and charger names are device-specific diagnostics; keep them off backups. -->
     <cloud-backup disableIfNoEncryptionCapabilities="true">
         <exclude domain="root" path="." />
     </cloud-backup>

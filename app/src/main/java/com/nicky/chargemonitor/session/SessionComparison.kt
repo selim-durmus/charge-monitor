@@ -20,6 +20,8 @@ data class SessionComparison(
     val secondComparableTrace: List<DiagnosticSample>,
     val averagePowerDeltaWatts: Double?,
     val confidenceScore: Int,
+    /** Plain-language reasons the score was reduced; empty when conditions matched well. */
+    val confidenceNotes: List<String>,
     val headline: String,
     val detail: String,
 )
@@ -39,7 +41,7 @@ object SessionComparator {
         } else {
             null
         }
-        val confidence = comparisonConfidence(
+        val (confidence, confidenceNotes) = comparisonConfidence(
             firstSession = firstSession,
             secondSession = secondSession,
             first = first,
@@ -69,6 +71,7 @@ object SessionComparator {
             secondComparableTrace = secondSamples,
             averagePowerDeltaWatts = delta,
             confidenceScore = confidence,
+            confidenceNotes = confidenceNotes,
             headline = headline,
             detail = detail,
         )
@@ -118,16 +121,24 @@ object SessionComparator {
         first: ComparisonMetrics,
         second: ComparisonMetrics,
         commonLevelRange: IntRange?,
-    ): Int {
-        var score = 10
-        if (first.bucketCount < 60 || second.bucketCount < 60) score -= 2
-        if (firstSession.initialSource != secondSession.initialSource) score -= 2
-        if (commonLevelRange == null) score -= 2
+    ): Pair<Int, List<String>> {
+        val notes = mutableListOf<String>()
+        if (first.bucketCount < 60 || second.bucketCount < 60) {
+            notes += "At least one trace has under a minute of comparable data."
+        }
+        if (firstSession.initialSource != secondSession.initialSource) {
+            notes += "The sessions used different connection types."
+        }
+        if (commonLevelRange == null) {
+            notes += "The battery-level ranges do not overlap."
+        }
         val levelDifference = listOfNotNull(
             first.startLevelPercent,
             second.startLevelPercent,
         ).let { levels -> if (levels.size == 2) abs(levels[0] - levels[1]) else 10 }
-        if (levelDifference > 5) score -= 2
+        if (levelDifference > 5) {
+            notes += "Starting battery levels differ by more than 5%."
+        }
         val firstStartTemperature = firstSession.samples.firstNotNullOfOrNull {
             it.temperatureCelsius
         }
@@ -138,9 +149,9 @@ object SessionComparator {
             secondStartTemperature != null &&
             abs(firstStartTemperature - secondStartTemperature) > 3.0
         ) {
-            score -= 2
+            notes += "Starting temperatures differ by more than 3 °C."
         }
-        return score.coerceIn(1, 10)
+        return (10 - notes.size * 2).coerceIn(1, 10) to notes
     }
 
     private fun List<Double>.percentileOrNull(fraction: Double): Double? {
